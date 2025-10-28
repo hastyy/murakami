@@ -1,0 +1,9 @@
+{
+  "go.useLanguageServer": true,
+  "gopls": {
+    "ui.semanticTokens": true,
+    "formatting.gofumpt": true
+  },
+  "go.testFlags": ["-v"],
+  "go.toolsManagement.autoUpdate": true
+}
