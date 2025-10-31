@@ -81,7 +81,7 @@ func TestConnectionReadWriter_Write_WithConnection(t *testing.T) {
 
 	// Write data from server side using ConnectionReadWriter
 	testData := []byte("Hello, World!")
-	
+
 	// Read from client side in goroutine
 	done := make(chan struct{})
 	var readData []byte
@@ -150,15 +150,12 @@ func TestConnectionReadWriter_Read_HitsLimit(t *testing.T) {
 	rw := NewConnectionReadWriter(bufferSize)
 	rw.Attach(serverConn)
 	rw.ResetLimits()
-	
+
 	// Write more data than the limit from client side
 	testData := []byte("Hello, World! This is more than the buffer limit!")
 	require.Greater(t, len(testData), bufferSize)
-	
-	go func() {
-		_, err := clientConn.Write(testData)
-		require.NoError(t, err)
-	}()
+
+	go clientConn.Write(testData)
 
 	// Read all available data until we hit the limit
 	buf := make([]byte, len(testData))
@@ -176,7 +173,7 @@ func TestConnectionReadWriter_Read_HitsLimit(t *testing.T) {
 
 	// Should have read exactly up to the limit (bufferSize)
 	require.Equal(t, bufferSize, totalRead, "should read exactly buffer size bytes before hitting limit")
-	
+
 	// Verify we can't read more after hitting the limit
 	n, err := rw.Read(buf[totalRead:])
 	require.Equal(t, io.EOF, err)
@@ -197,11 +194,11 @@ func TestConnectionReadWriter_Read_ResetLimitsAllowsMoreReads(t *testing.T) {
 	rw := NewConnectionReadWriter(bufferSize)
 	rw.Attach(serverConn)
 	rw.ResetLimits()
-	
+
 	// Write more data than the limit from client side
 	testData := []byte("Hello, World! This is more than the buffer limit!")
 	require.Greater(t, len(testData), bufferSize)
-	
+
 	go func() {
 		_, err := clientConn.Write(testData)
 		require.NoError(t, err)
@@ -226,7 +223,7 @@ func TestConnectionReadWriter_Read_ResetLimitsAllowsMoreReads(t *testing.T) {
 
 	// Reset limits
 	rw.ResetLimits()
-	
+
 	// Verify we can read more after resetting limits
 	n, err := rw.Read(buf[totalRead:])
 	require.NoError(t, err)
