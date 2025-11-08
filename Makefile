@@ -31,4 +31,3 @@ clean:
 	@echo "Cleaning..."
 	@rm -rf $(BIN_DIR)
 	@mkdir -p $(BIN_DIR)
-
