@@ -263,7 +263,7 @@ func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
 	})
 
 	go func() {
-		err := s.Start(mockHandler(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+		err := s.Start(HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
 			time.Sleep(1 * time.Millisecond)
 			return false
 		}))
@@ -317,7 +317,7 @@ func TestStop_ReturnsContextCanceledError(t *testing.T) {
 		},
 	})
 
-	go s.Start(mockHandler(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+	go s.Start(HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
 		time.Sleep(1 * time.Second)
 		return false
 	}))
@@ -376,12 +376,6 @@ type mockTimeoutError struct{}
 func (e *mockTimeoutError) Error() string   { return "mock timeout" }
 func (e *mockTimeoutError) Timeout() bool   { return true }
 func (e *mockTimeoutError) Temporary() bool { return true }
-
-type mockHandler func(ctx context.Context, rw *ConnectionReadWriter) bool
-
-func (h mockHandler) Handle(ctx context.Context, rw *ConnectionReadWriter) bool {
-	return h(ctx, rw)
-}
 
 type mockConn struct {
 	net.Conn

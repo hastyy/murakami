@@ -44,6 +44,13 @@ type Handler interface {
 	Handle(ctx context.Context, rw *ConnectionReadWriter) (close bool)
 }
 
+// HandlerFunc can wrap a function with the Handle format and turn it into a Handler.
+type HandlerFunc func(ctx context.Context, rw *ConnectionReadWriter) (close bool)
+
+func (h HandlerFunc) Handle(ctx context.Context, rw *ConnectionReadWriter) (close bool) {
+	return h(ctx, rw)
+}
+
 type ConnectionReadWriterPool interface {
 	Get() *ConnectionReadWriter
 	Put(*ConnectionReadWriter)
