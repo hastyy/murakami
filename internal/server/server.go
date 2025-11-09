@@ -234,9 +234,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 	defer s.connWg.Done()
 
 	// Get a ConnectionReadWriter from the pool
-	rw := s.cfg.RWPool.Get()
+	rw := s.rwPool.Get()
 	// Return the ConnectionReadWriter to the pool when the handler returns
-	defer s.cfg.RWPool.Put(rw)
+	defer s.rwPool.Put(rw)
 
 	// Attach the connection to the ConnectionReadWriter
 	rw.Attach(conn)
