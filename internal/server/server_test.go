@@ -33,6 +33,8 @@ func TestNew_PanicsOnNilRWPool(t *testing.T) {
 }
 
 func TestNew_CreatesProperServer(t *testing.T) {
+	require := require.New(t)
+
 	addr := netip.AddrPortFrom(netip.IPv4Unspecified(), 8080)
 	rwPool := &mockConnectionReadWriterPool{}
 
@@ -50,18 +52,20 @@ func TestNew_CreatesProperServer(t *testing.T) {
 	require.NotNil(t, s)
 
 	// Verify state is idle
-	require.Equal(t, idle, s.state)
+	require.Equal(idle, s.state)
 
 	// Verify config values are set correctly
-	require.Equal(t, addr, s.cfg.Address)
+	require.Equal(addr, s.cfg.Address)
 	require.NotNil(t, s.cfg.StartListener)
-	require.Equal(t, rwPool, s.cfg.RWPool)
+	require.Equal(rwPool, s.cfg.RWPool)
 	require.NotNil(t, s.cfg.BackoffFunc)
-	require.Equal(t, DefaultConfig.MaxAcceptDelay, s.cfg.MaxAcceptDelay)
+	require.Equal(DefaultConfig.MaxAcceptDelay, s.cfg.MaxAcceptDelay)
 	require.NotNil(t, s.cfg.StartListener)
 }
 
 func TestStart_ReturnsErrorOnAlreadyStopped(t *testing.T) {
+	require := require.New(t)
+
 	s := New(Config{
 		Address: netip.AddrPortFrom(netip.IPv4Unspecified(), 8080),
 		RWPool:  &mockConnectionReadWriterPool{},
@@ -70,11 +74,13 @@ func TestStart_ReturnsErrorOnAlreadyStopped(t *testing.T) {
 	s.Stop(t.Context())
 
 	err := s.Start(nil)
-	require.Error(t, err)
-	require.Equal(t, ErrAlreadyStopped, err)
+	require.Error(err)
+	require.Equal(ErrAlreadyStopped, err)
 }
 
 func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
+	require := require.New(t)
+
 	signalEnteredAccept := make(chan struct{})
 	signalCloseListener := make(chan struct{})
 
@@ -96,13 +102,15 @@ func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
 	<-signalEnteredAccept
 
 	err := s.Start(nil)
-	require.Error(t, err)
-	require.Equal(t, ErrAlreadyStarted, err)
+	require.Error(err)
+	require.Equal(ErrAlreadyStarted, err)
 
 	close(signalCloseListener)
 }
 
 func TestStart_ReturnsErrorOnListenerError(t *testing.T) {
+	require := require.New(t)
+
 	listenerErr := errors.New("listener error")
 
 	s := New(Config{
@@ -115,14 +123,16 @@ func TestStart_ReturnsErrorOnListenerError(t *testing.T) {
 
 	// Confirm error is returned (wrapped in the error chain)
 	err := s.Start(nil)
-	require.Error(t, err)
-	require.ErrorIs(t, err, listenerErr)
+	require.Error(err)
+	require.ErrorIs(err, listenerErr)
 
 	// Confirm server never started running
-	require.Equal(t, s.state, idle)
+	require.Equal(s.state, idle)
 }
 
 func TestStart_ReturnsErrorOnListenerAcceptError(t *testing.T) {
+	require := require.New(t)
+
 	listenerErr := errors.New("listener error")
 
 	s := New(Config{
@@ -137,14 +147,16 @@ func TestStart_ReturnsErrorOnListenerAcceptError(t *testing.T) {
 
 	// Confirm error is returned (wrapped in the error chain)
 	err := s.Start(nil)
-	require.Error(t, err)
-	require.ErrorIs(t, err, listenerErr)
+	require.Error(err)
+	require.ErrorIs(err, listenerErr)
 
 	// Confirm server never started running
-	require.Equal(t, s.state, running)
+	require.Equal(s.state, running)
 }
 
 func TestStart_Backoff(t *testing.T) {
+	require := require.New(t)
+
 	iterations := 5
 	i := 0
 	delays := make([]time.Duration, 0, iterations)
@@ -176,34 +188,38 @@ func TestStart_Backoff(t *testing.T) {
 
 	<-signal
 
-	require.Equal(t, iterations, len(delays))
-	require.Equal(t, 5*time.Millisecond, delays[0])
-	require.Equal(t, 10*time.Millisecond, delays[1])
-	require.Equal(t, 20*time.Millisecond, delays[2])
-	require.Equal(t, 40*time.Millisecond, delays[3])
+	require.Equal(iterations, len(delays))
+	require.Equal(5*time.Millisecond, delays[0])
+	require.Equal(10*time.Millisecond, delays[1])
+	require.Equal(20*time.Millisecond, delays[2])
+	require.Equal(40*time.Millisecond, delays[3])
 
 	// Next step would be 80*time.Millisecond, but since we set cfg.MaxAcceptDelay to 50*time.Millisecond, it will be capped at that value
-	require.Equal(t, 50*time.Millisecond, delays[4])
+	require.Equal(50*time.Millisecond, delays[4])
 }
 
 func TestStop_StopsServerThatHasNeverBeenStarted(t *testing.T) {
+	require := require.New(t)
+
 	s := New(Config{
 		Address: netip.AddrPortFrom(netip.IPv4Unspecified(), 8080),
 		RWPool:  &mockConnectionReadWriterPool{},
 	})
 
 	// Verify server is idle
-	require.Equal(t, idle, s.state)
+	require.Equal(idle, s.state)
 
 	// Stop should succeed without error
 	err := s.Stop(t.Context())
-	require.NoError(t, err)
+	require.NoError(err)
 
 	// Verify server is stopped
-	require.Equal(t, stopped, s.state)
+	require.Equal(stopped, s.state)
 }
 
 func TestStop_ReturnsErrorOnAlreadyStopped(t *testing.T) {
+	require := require.New(t)
+
 	s := New(Config{
 		Address: netip.AddrPortFrom(netip.IPv4Unspecified(), 8080),
 		RWPool:  &mockConnectionReadWriterPool{},
@@ -211,16 +227,18 @@ func TestStop_ReturnsErrorOnAlreadyStopped(t *testing.T) {
 
 	// Stop the server once
 	err := s.Stop(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, stopped, s.state)
+	require.NoError(err)
+	require.Equal(stopped, s.state)
 
 	// Attempt to stop again should return error
 	err = s.Stop(t.Context())
-	require.Error(t, err)
-	require.Equal(t, ErrAlreadyStopped, err)
+	require.Error(err)
+	require.Equal(ErrAlreadyStopped, err)
 }
 
 func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
+	require := require.New(t)
+
 	conns := make(chan *mockConn, 5)
 	connRefs := make([]*mockConn, 0, 5)
 	var connWg sync.WaitGroup
@@ -273,17 +291,19 @@ func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
 	<-connsReady
 
 	err := s.Stop(t.Context())
-	require.NoError(t, err)
+	require.NoError(err)
 
-	require.Equal(t, stopped, s.state)
+	require.Equal(stopped, s.state)
 
 	connWg.Wait()
 	for _, conn := range connRefs {
-		require.True(t, conn.closed)
+		require.True(conn.closed)
 	}
 }
 
 func TestStop_ReturnsContextCanceledError(t *testing.T) {
+	require := require.New(t)
+
 	conns := make(chan *mockConn, 5)
 	for range 5 {
 		serverConn, clientConn := net.Pipe()
@@ -328,7 +348,7 @@ func TestStop_ReturnsContextCanceledError(t *testing.T) {
 	cancel()
 
 	err := s.Stop(ctx)
-	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(err, context.Canceled)
 }
 
 type mockConnectionReadWriterPool struct{}
