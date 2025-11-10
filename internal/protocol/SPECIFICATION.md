@@ -2,6 +2,33 @@
 
 Status: Draft
 
+## Table of Contents
+
+- [Simple Stream Serialization Protocol (S3P) v0.1.0](#simple-stream-serialization-protocol-s3p-v010)
+  - [Table of Contents](#table-of-contents)
+  - [1. Introduction](#1-introduction)
+  - [2. Design Goals](#2-design-goals)
+  - [3. Data Types and Framing](#3-data-types-and-framing)
+  - [4. General Rules](#4-general-rules)
+  - [5. Log Sequence Numbers and Timestamps](#5-log-sequence-numbers-and-timestamps)
+  - [6. Stream Naming](#6-stream-naming)
+  - [7. Options Encoding](#7-options-encoding)
+  - [8. Commands](#8-commands)
+    - [8.1 CREATE](#81-create)
+    - [8.2 APPEND](#82-append)
+    - [8.3 READ](#83-read)
+    - [8.4 TRIM](#84-trim)
+    - [8.5 DELETE](#85-delete)
+  - [9. Error Format](#9-error-format)
+  - [10. Case Insensitivity](#10-case-insensitivity)
+  - [11. Configuration and Limits](#11-configuration-and-limits)
+  - [12. Concurrency and Ordering](#12-concurrency-and-ordering)
+  - [13. Pipelining and Connection Handling](#13-pipelining-and-connection-handling)
+  - [14. Compatibility and Extensibility](#14-compatibility-and-extensibility)
+  - [15. Security Considerations](#15-security-considerations)
+  - [16. Data Integrity](#16-data-integrity)
+  - [17. Appendix A: Non-normative ABNF (excerpt)](#17-appendix-a-non-normative-abnf-excerpt)
+
 ## 1. Introduction
 
 Simple Stream Serialization Protocol (S3P) is a text-framed, binary-safe wire protocol inspired by the Redis Serialization Protocol (RESP). S3P is designed to be simple to implement, fast to parse, human-readable, and focused on append-only stream use cases similar to Redis Streams.
@@ -259,7 +286,7 @@ Request schema (Array):
 
 Known options:
 
-- `COUNT`: number (ASCII decimal in Bulk String), inclusive range [1, max-configured]; defaults to a server-configured value
+- `COUNT`: number (ASCII decimal in Bulk String), inclusive range [1, max-configured]; defaults to a server-configured value; is the max number of records that can be returned per request
 - `BLOCK`: milliseconds to wait for new entries if none available (ASCII decimal in Bulk String); defaults to `0`; MUST be ≤ max-configured
 - `MIN_TIMESTAMP`: `<ms>-<seq>`; only return records with timestamp strictly greater than this value; defaults to `0-0`
 
@@ -328,7 +355,7 @@ Request schema (Array):
 
 Known options:
 
-- `UNTIL`: timestamp in the `<ms>-<seq>` format; all records with timestamp strictly less than this value are removed
+- `UNTIL`: [mandatory] timestamp in the `<ms>-<seq>` format; all records with timestamp strictly less than this value are removed
 
 Replies:
 
