@@ -22,11 +22,11 @@ type Config struct {
 	StartListener func(addr netip.AddrPort) (net.Listener, error)
 	// The function to back off the server after an error. Takes in the delay duration. It defaults to time.Sleep.
 	BackoffFunc func(delay time.Duration)
-	// The maximum delay to wait before accepting a new connection. It defaults to 1 second.
+	// The maximum delay to wait before accepting a new connection.
 	MaxAcceptDelay time.Duration
-	// The maximum number of concurrent connections to accept. It defaults to 10k.
+	// The maximum number of concurrent connections to accept.
 	MaxConcurrentConnections int
-	// The size of the buffer to use for reading from the connection. It defaults to 1024 bytes.
+	// The size of the buffer to use for reading from the connection.
 	ConnectionReadBufferSize int
 }
 
