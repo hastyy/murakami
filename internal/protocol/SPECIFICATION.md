@@ -206,7 +206,7 @@ Limits and validation:
 
 Replies:
 
-- `+OK\r\n` on success
+- Bulk string with last appended timestamp on success
 - Error on failure (connection then closed):
   - `ERR_UNKNOWN_STREAM`: there is no stream with the provided name
   - `ERR_BAD_FORMAT`:
