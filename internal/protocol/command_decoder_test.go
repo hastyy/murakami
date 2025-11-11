@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hastyy/murakami/internal/util"
 	"github.com/stretchr/testify/require"
@@ -509,11 +510,379 @@ func TestDecodeAppendCommand_BufferPool_ReceivesAllBuffersBackUponError(t *testi
 	require.Equal(pool.putCallsCount, pool.getCallsCount)
 }
 
-func TestDecodeReadCommand(t *testing.T) {}
+func TestDecodeReadCommand(t *testing.T) {
+	require := require.New(t)
 
-func TestDecodeTrimCommand(t *testing.T) {}
+	d := NewCommandDecoder(Config{
+		BufPool: &mockBufferPool{},
+	})
 
-func TestDecodeDeleteCommand(t *testing.T) {}
+	tests := []struct {
+		name        string
+		reader      *bufio.Reader
+		expectedCmd ReadCommand
+		expectedErr error
+	}{
+		{
+			name:   "successfully decode READ command with default options",
+			reader: readerFrom("$6\r\nstream\r\n*0\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					Count:        DefaultConfig.MaxReadCount,
+					MinTimestamp: "0-0",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "successfully decode READ command with COUNT option",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nCOUNT\r\n$2\r\n10\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					Count:        10,
+					MinTimestamp: "0-0",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "successfully decode READ command with BLOCK option",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nBLOCK\r\n$4\r\n5000\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					Block:        5_000 * time.Millisecond,
+					Count:        DefaultConfig.MaxReadCount,
+					MinTimestamp: "0-0",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "successfully decode READ command with MIN_TIMESTAMP option",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$13\r\nMIN_TIMESTAMP\r\n$15\r\n1700000001234-0\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					MinTimestamp: "1700000001234-0",
+					Count:        DefaultConfig.MaxReadCount,
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "successfully decode READ command with all options",
+			reader: readerFrom("$6\r\nstream\r\n*6\r\n$5\r\nCOUNT\r\n$2\r\n50\r\n$5\r\nBLOCK\r\n$4\r\n1000\r\n$13\r\nMIN_TIMESTAMP\r\n$3\r\n0-0\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					Count:        50,
+					Block:        1_000 * time.Millisecond,
+					MinTimestamp: "0-0",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "should work correctly with mixed case option keys",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nCoUnT\r\n$2\r\n25\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					Count:        25,
+					MinTimestamp: "0-0",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:        "should fail when reading stream with empty name",
+			reader:      readerFrom("$0\r\n\r\n*0\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "bulk string length must be greater than 0, got 0"},
+		},
+		{
+			name:        "should fail when reading stream with name length greater than configured max length",
+			reader:      readerFrom("$257\r\n" + strings.Repeat("a", 257) + "\r\n*0\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeLimits, "bulk string length must be less than or equal to 256, got 257"},
+		},
+		{
+			name:        "should fail with odd number of elements in options array",
+			reader:      readerFrom("$6\r\nstream\r\n*3\r\n$5\r\nCOUNT\r\n$2\r\n10\r\n$7\r\ninvalid\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "options array must have an even number of elements"},
+		},
+		{
+			name:        "should fail when options contains an unknown key",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$11\r\nUNKNOWN_KEY\r\n$5\r\nvalue\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "unknown option: UNKNOWN_KEY"},
+		},
+		{
+			name:        "should fail with invalid COUNT value (non-numeric)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nCOUNT\r\n$3\r\nabc\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option COUNT: abc"},
+		},
+		{
+			name:        "should fail with invalid COUNT value (negative)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nCOUNT\r\n$2\r\n-5\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option COUNT: -5"},
+		},
+		{
+			name:        "should fail with invalid BLOCK value (non-numeric)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nBLOCK\r\n$3\r\nxyz\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option BLOCK: xyz"},
+		},
+		{
+			name:        "should fail with invalid BLOCK value (negative)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nBLOCK\r\n$3\r\n-10\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option BLOCK: -10"},
+		},
+		{
+			name:        "should fail with invalid MIN_TIMESTAMP format (missing dash)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$13\r\nMIN_TIMESTAMP\r\n$13\r\n1700000001234\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option MIN_TIMESTAMP: 1700000001234"},
+		},
+		{
+			name:        "should fail with invalid MIN_TIMESTAMP format (missing number after dash)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$13\r\nMIN_TIMESTAMP\r\n$14\r\n1700000001234-\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option MIN_TIMESTAMP: 1700000001234-"},
+		},
+		{
+			name:        "should fail with invalid MIN_TIMESTAMP format (contains letters)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$13\r\nMIN_TIMESTAMP\r\n$15\r\n1700000abc234-0\r\n"),
+			expectedCmd: ReadCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option MIN_TIMESTAMP: 1700000abc234-0"},
+		},
+		{
+			name:   "should use last value when same option key appears multiple times",
+			reader: readerFrom("$6\r\nstream\r\n*4\r\n$5\r\nCOUNT\r\n$2\r\n10\r\n$5\r\nCOUNT\r\n$2\r\n20\r\n"),
+			expectedCmd: ReadCommand{
+				StreamName: "stream",
+				Options: ReadCommandOptions{
+					Count:        20,
+					MinTimestamp: "0-0",
+				},
+			},
+			expectedErr: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd, err := d.DecodeReadCommand(test.reader)
+
+			if test.expectedErr != nil {
+				require.Error(err)
+				require.Equal(test.expectedErr.Error(), err.Error())
+			} else {
+				require.NoError(err)
+			}
+
+			require.Equal(test.expectedCmd.StreamName, cmd.StreamName)
+			require.Equal(test.expectedCmd.Options.Count, cmd.Options.Count)
+			require.Equal(test.expectedCmd.Options.Block, cmd.Options.Block)
+			require.Equal(test.expectedCmd.Options.MinTimestamp, cmd.Options.MinTimestamp)
+		})
+	}
+}
+
+func TestDecodeTrimCommand(t *testing.T) {
+	require := require.New(t)
+
+	d := NewCommandDecoder(Config{
+		BufPool: &mockBufferPool{},
+	})
+
+	tests := []struct {
+		name        string
+		reader      *bufio.Reader
+		expectedCmd TrimCommand
+		expectedErr error
+	}{
+		{
+			name:   "successfully decode TRIM command with UNTIL option",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nUNTIL\r\n$15\r\n1700000001234-0\r\n"),
+			expectedCmd: TrimCommand{
+				StreamName: "stream",
+				Options: TrimCommandOptions{
+					Until: "1700000001234-0",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "should work correctly with mixed case option key",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nuNtIl\r\n$15\r\n1700000005678-1\r\n"),
+			expectedCmd: TrimCommand{
+				StreamName: "stream",
+				Options: TrimCommandOptions{
+					Until: "1700000005678-1",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:   "should work well with a large timestamp",
+			reader: readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nUNTIL\r\n$21\r\n9999999999999999-9999\r\n"),
+			expectedCmd: TrimCommand{
+				StreamName: "stream",
+				Options: TrimCommandOptions{
+					Until: "9999999999999999-9999",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:        "should fail when trimming stream with empty name",
+			reader:      readerFrom("$0\r\n\r\n*2\r\n$5\r\nUNTIL\r\n$3\r\n0-0\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "bulk string length must be greater than 0, got 0"},
+		},
+		{
+			name:        "should fail when trimming stream with name length greater than configured max length",
+			reader:      readerFrom("$257\r\n" + strings.Repeat("a", 257) + "\r\n*2\r\n$5\r\nUNTIL\r\n$3\r\n0-0\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeLimits, "bulk string length must be less than or equal to 256, got 257"},
+		},
+		{
+			name:        "should fail with odd number of elements in options array",
+			reader:      readerFrom("$6\r\nstream\r\n*3\r\n$5\r\nUNTIL\r\n$15\r\n1700000001234-0\r\n$7\r\ninvalid\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "options array must have an even number of elements"},
+		},
+		{
+			name:        "should fail when options contains an unknown key",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$11\r\nUNKNOWN_KEY\r\n$5\r\nvalue\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "unknown option: UNKNOWN_KEY"},
+		},
+		{
+			name:        "should fail with invalid UNTIL timestamp format (missing dash)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nUNTIL\r\n$13\r\n1700000001234\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option UNTIL: 1700000001234"},
+		},
+		{
+			name:        "should fail with invalid UNTIL timestamp format (missing number after dash)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nUNTIL\r\n$14\r\n1700000001234-\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option UNTIL: 1700000001234-"},
+		},
+		{
+			name:        "should fail with invalid UNTIL timestamp format (contains letters)",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$5\r\nUNTIL\r\n$15\r\n1700000abc234-0\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "invalid value for option UNTIL: 1700000abc234-0"},
+		},
+		{
+			name:        "should fail with missing UNTIL option (empty options array)",
+			reader:      readerFrom("$6\r\nstream\r\n*0\r\n"),
+			expectedCmd: TrimCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "option UNTIL is required"},
+		},
+		{
+			name:   "should use last value when UNTIL option key appears multiple times",
+			reader: readerFrom("$6\r\nstream\r\n*4\r\n$5\r\nUNTIL\r\n$15\r\n1700000001234-0\r\n$5\r\nUNTIL\r\n$15\r\n1700000005678-1\r\n"),
+			expectedCmd: TrimCommand{
+				StreamName: "stream",
+				Options: TrimCommandOptions{
+					Until: "1700000005678-1",
+				},
+			},
+			expectedErr: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd, err := d.DecodeTrimCommand(test.reader)
+
+			if test.expectedErr != nil {
+				require.Error(err)
+				require.Equal(test.expectedErr.Error(), err.Error())
+			} else {
+				require.NoError(err)
+			}
+
+			require.Equal(test.expectedCmd.StreamName, cmd.StreamName)
+			require.Equal(test.expectedCmd.Options.Until, cmd.Options.Until)
+		})
+	}
+}
+
+func TestDecodeDeleteCommand(t *testing.T) {
+	require := require.New(t)
+
+	d := NewCommandDecoder(Config{
+		BufPool: &mockBufferPool{},
+	})
+
+	tests := []struct {
+		name        string
+		reader      *bufio.Reader
+		expectedCmd DeleteCommand
+		expectedErr error
+	}{
+		{
+			name:   "successfully decode DELETE command with empty options",
+			reader: readerFrom("$6\r\nstream\r\n*0\r\n"),
+			expectedCmd: DeleteCommand{
+				StreamName: "stream",
+				Options:    DeleteCommandOptions{},
+			},
+			expectedErr: nil,
+		},
+		{
+			name:        "should fail when deleting stream with empty name",
+			reader:      readerFrom("$0\r\n\r\n*0\r\n"),
+			expectedCmd: DeleteCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "bulk string length must be greater than 0, got 0"},
+		},
+		{
+			name:        "should fail when deleting stream with name length greater than configured max length",
+			reader:      readerFrom("$257\r\n" + strings.Repeat("a", 257) + "\r\n*0\r\n"),
+			expectedCmd: DeleteCommand{},
+			expectedErr: Error{ErrCodeLimits, "bulk string length must be less than or equal to 256, got 257"},
+		},
+		{
+			name:        "should fail with odd number of elements in options array",
+			reader:      readerFrom("$6\r\nstream\r\n*3\r\n$3\r\nKEY\r\n$5\r\nvalue\r\n$7\r\ninvalid\r\n"),
+			expectedCmd: DeleteCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "options array must have an even number of elements"},
+		},
+		{
+			name:        "should fail when options contains an unknown key",
+			reader:      readerFrom("$6\r\nstream\r\n*2\r\n$11\r\nUNKNOWN_KEY\r\n$5\r\nvalue\r\n"),
+			expectedCmd: DeleteCommand{},
+			expectedErr: Error{ErrCodeBadFormat, "unknown option: UNKNOWN_KEY"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd, err := d.DecodeDeleteCommand(test.reader)
+
+			if test.expectedErr != nil {
+				require.Error(err)
+				require.Equal(test.expectedErr.Error(), err.Error())
+			} else {
+				require.NoError(err)
+			}
+
+			require.Equal(test.expectedCmd.StreamName, cmd.StreamName)
+		})
+	}
+}
 
 func readerFrom(str string) *bufio.Reader {
 	return bufio.NewReader(strings.NewReader(str))

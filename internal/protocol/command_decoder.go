@@ -371,7 +371,7 @@ func (d *CommandDecoder) DecodeReadCommand(reader *bufio.Reader) (ReadCommand, e
 		switch key {
 		case optionCount:
 			var count int
-			if count, err = strconv.Atoi(value); err != nil {
+			if count, err = strconv.Atoi(value); err != nil || count < 1 {
 				return ReadCommand{}, Error{ErrCodeBadFormat, fmt.Sprintf("invalid value for option %s: %s", key, value)}
 			}
 			if count < 1 || count > d.cfg.MaxReadCount {
@@ -379,10 +379,11 @@ func (d *CommandDecoder) DecodeReadCommand(reader *bufio.Reader) (ReadCommand, e
 			}
 			cmd.Options.Count = count
 		case optionBlock:
-			var block time.Duration
-			if block, err = time.ParseDuration(value); err != nil {
+			nblock, err := strconv.Atoi(value)
+			if err != nil || nblock < 0 {
 				return ReadCommand{}, Error{ErrCodeBadFormat, fmt.Sprintf("invalid value for option %s: %s", key, value)}
 			}
+			block := time.Duration(nblock) * time.Millisecond
 			if block < 0 || block > d.cfg.MaxReadBlock {
 				return ReadCommand{}, Error{ErrCodeLimits, fmt.Sprintf("%s must be between 0 and %d, got %d", key, d.cfg.MaxReadBlock, block)}
 			}
