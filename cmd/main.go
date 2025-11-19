@@ -14,8 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hastyy/murakami/internal/bufferpool"
 	"github.com/hastyy/murakami/internal/config"
+	"github.com/hastyy/murakami/internal/handler"
+	"github.com/hastyy/murakami/internal/protocol"
 	"github.com/hastyy/murakami/internal/server"
+	"github.com/hastyy/murakami/internal/service"
 	"github.com/hastyy/murakami/internal/util"
 )
 
@@ -26,6 +30,15 @@ func main() {
 	// Parse the initial config
 	cfg := parseConfig(logger)
 
+	// Component initialization
+	streamService := service.NewLogService(service.NewTimestampKeyGenerator())
+	bufPool := bufferpool.New(bufferpool.Config{})
+	commandDecoder := protocol.NewCommandDecoder(protocol.Config{
+		BufPool: bufPool,
+	})
+	replyEncoder := protocol.NewReplyEncoder()
+	handler := handler.NewHandler(streamService, commandDecoder, replyEncoder, logger)
+
 	// Create a new server with the combined config and dependencies
 	srv := server.New(server.Config{
 		Address: cfg.Server.Address,
@@ -35,7 +48,7 @@ func main() {
 
 	// When the server stops it will return an error (can be nil) through this channel
 	serr := make(chan error, 1)
-	go func() { serr <- srv.Start(server.HandlerFunc(echoHandler)) }()
+	go func() { serr <- srv.Start(handler) }()
 
 	// When this context is cancelled, we will try to gracefully stop the server
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -59,22 +72,6 @@ func main() {
 	}
 	logger.Info("server stopped gracefully")
 	os.Exit(0)
-}
-
-func echoHandler(ctx context.Context, rw *server.ConnectionReadWriter) (close bool) {
-	buf := make([]byte, 1024)
-	nr, err := rw.Read(buf)
-	if err != nil {
-		return true
-	}
-	nw, err := rw.Write(buf[:nr])
-	if err != nil {
-		return true
-	}
-	if nw < nr {
-		return true
-	}
-	return false
 }
 
 func parseConfig(logger *slog.Logger) config.Config {
