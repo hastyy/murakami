@@ -99,6 +99,9 @@ func New(cfg Config) *Server {
 // If multiple Start() calls are made, even if concurrently, only one will succeed.
 // If we try to start and already stoped server, it will also return an error.
 func (s *Server) Start(h Handler) error {
+	// Validate handler is not nil
+	assert.NonNil(h, "Handler is required")
+
 	// Synchronize with other Start() and Stop() calls
 	s.mu.Lock()
 

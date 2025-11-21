@@ -49,18 +49,27 @@ func TestNew_CreatesProperServer(t *testing.T) {
 	})
 
 	// Verify server is not nil
-	require.NotNil(t, s)
+	require.NotNil(s)
 
 	// Verify state is idle
 	require.Equal(idle, s.state)
 
 	// Verify config values are set correctly
 	require.Equal(addr, s.cfg.Address)
-	require.NotNil(t, s.cfg.StartListener)
+	require.NotNil(s.cfg.StartListener)
 	require.Equal(rwPool, s.cfg.RWPool)
-	require.NotNil(t, s.cfg.BackoffFunc)
+	require.NotNil(s.cfg.BackoffFunc)
 	require.Equal(DefaultConfig.MaxAcceptDelay, s.cfg.MaxAcceptDelay)
-	require.NotNil(t, s.cfg.StartListener)
+	require.NotNil(s.cfg.StartListener)
+}
+
+func TestStart_PanicsOnNilHandler(t *testing.T) {
+	testutil.AssertPanics(t, func() {
+		New(Config{
+			Address: netip.AddrPortFrom(netip.IPv4Unspecified(), 8080),
+			RWPool:  &mockConnectionReadWriterPool{},
+		}).Start(nil)
+	})
 }
 
 func TestStart_ReturnsErrorOnAlreadyStopped(t *testing.T) {
@@ -73,7 +82,9 @@ func TestStart_ReturnsErrorOnAlreadyStopped(t *testing.T) {
 
 	s.Stop(t.Context())
 
-	err := s.Start(nil)
+	err := s.Start(HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+		return true
+	}))
 	require.Error(err)
 	require.Equal(ErrAlreadyStopped, err)
 }
@@ -84,6 +95,8 @@ func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
 	signalEnteredAccept := make(chan struct{})
 	signalCloseListener := make(chan struct{})
 
+	listenerClosedErr := errors.New("listener closed")
+
 	s := New(Config{
 		Address: netip.AddrPortFrom(netip.IPv4Unspecified(), 8080),
 		RWPool:  &mockConnectionReadWriterPool{},
@@ -91,17 +104,21 @@ func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
 			return &mockListener{acceptLogic: func() (net.Conn, error) {
 				close(signalEnteredAccept)
 				<-signalCloseListener
-				return nil, nil
+				return nil, listenerClosedErr
 			}}, nil
 		},
 	})
 
-	go s.Start(nil)
+	mockHandler := HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+		return true
+	})
+
+	go s.Start(mockHandler)
 	defer s.Stop(t.Context())
 
 	<-signalEnteredAccept
 
-	err := s.Start(nil)
+	err := s.Start(mockHandler)
 	require.Error(err)
 	require.Equal(ErrAlreadyStarted, err)
 
@@ -121,8 +138,12 @@ func TestStart_ReturnsErrorOnListenerError(t *testing.T) {
 		},
 	})
 
+	mockHandler := HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+		return true
+	})
+
 	// Confirm error is returned (wrapped in the error chain)
-	err := s.Start(nil)
+	err := s.Start(mockHandler)
 	require.Error(err)
 	require.ErrorIs(err, listenerErr)
 
@@ -145,8 +166,12 @@ func TestStart_ReturnsErrorOnListenerAcceptError(t *testing.T) {
 		},
 	})
 
+	mockHandler := HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+		return true
+	})
+
 	// Confirm error is returned (wrapped in the error chain)
-	err := s.Start(nil)
+	err := s.Start(mockHandler)
 	require.Error(err)
 	require.ErrorIs(err, listenerErr)
 
@@ -179,9 +204,13 @@ func TestStart_Backoff(t *testing.T) {
 		MaxAcceptDelay: 50 * time.Millisecond,
 	})
 
+	mockHandler := HandlerFunc(func(ctx context.Context, rw *ConnectionReadWriter) bool {
+		return true
+	})
+
 	signal := make(chan struct{})
 	go func() {
-		_ = s.Start(nil)
+		_ = s.Start(mockHandler)
 		close(signal)
 	}()
 	defer s.Stop(t.Context())
@@ -285,7 +314,7 @@ func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
 			time.Sleep(1 * time.Millisecond)
 			return false
 		}))
-		require.Nil(t, err)
+		require.Nil(err)
 	}()
 
 	<-connsReady
@@ -328,8 +357,6 @@ func TestStop_ReturnsContextCanceledError(t *testing.T) {
 						return conn, nil
 					default:
 						close(connsReady)
-						//select {} // block foreveer
-						//return nil, nil
 						return nil, &mockTimeoutError{}
 					}
 				},
