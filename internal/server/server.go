@@ -246,6 +246,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 	// Detach the connection from the ConnectionReadWriter when the handler returns
 	defer rw.Detach()
 
+	// Set a read timeout to periodically check for context cancellation
+	const readTimeout = 100 * time.Millisecond
+
 	// Handle the connection in a loop
 	for {
 		select {
@@ -253,6 +256,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 			// If the context is done, return
 			return
 		default:
+			// Set a read deadline to allow periodic context checks
+			// This guarantees we close the connection if the context is cancelled.
+			// Instead of being blocked forever by a pending read.
+			// TODO: move into rw.ResetLimits() once readTimeout is also moved to config
+			conn.SetReadDeadline(time.Now().Add(readTimeout))
+
 			// Reset the limits of the ConnectionReadWriter for each iteration
 			rw.ResetLimits()
 			if close := h.Handle(ctx, rw); close {

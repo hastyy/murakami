@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 
@@ -60,6 +61,11 @@ func NewHandler(streamService StreamService, commandDecoder CommandDecoder, repl
 func (h *Handler) Handle(ctx context.Context, rw *server.ConnectionReadWriter) (close bool) {
 	cmdSpec, err := h.commandDecoder.DecodeNextCommand(rw.Reader())
 	if err != nil {
+		// Check if it's a timeout error - if so, don't close the connection, just retry
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			return false
+		}
+		// For any other error (including EOF), handle it normally
 		return h.handleError(err, rw)
 	}
 
