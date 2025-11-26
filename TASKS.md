@@ -1,0 +1,3 @@
+- New protocol iteration more akin to Redis Streams (ID instead of TIMESTAMP , no explicit option for strategy)
+- Padding to IDs https://claude.ai/chat/495a7978-8fc1-486d-a8bb-ab0a638244ca
+- TCP improvements https://claude.ai/chat/956517f3-75f3-4d08-9784-61a053aaf370 , https://jewelhuq.medium.com/mastering-high-performance-tcp-udp-socket-programming-in-go-996dc85f5de1 , https://dev.to/jones_charles_ad50858dbc0/build-a-blazing-fast-tcp-server-in-go-a-practical-guide-29d , https://www.youtube.com/watch?v=LI1YTFMi8W4 , https://www.reddit.com/r/golang/comments/1c174z7/ways_to_improve_performance_on_thousands_of/
