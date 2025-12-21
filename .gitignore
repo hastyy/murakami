@@ -16,6 +16,3 @@ coverage.*
 # Go
 vendor/
 **/*_gen.go
-
-# Archive
-__archive__/ 

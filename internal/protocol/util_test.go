@@ -1,0 +1,548 @@
+package protocol
+
+import (
+	"bufio"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestUtil_ExpectNextByte(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name              string
+		inputReader       *bufio.Reader
+		inputExpectedByte byte
+		OutputExpectedErr error
+	}{
+		{
+			name:              "next byte is the expected one",
+			inputReader:       reader("*3"),
+			inputExpectedByte: '*',
+			OutputExpectedErr: nil,
+		},
+		{
+			name:              "next byte is not the expected one",
+			inputReader:       reader("$3"),
+			inputExpectedByte: '*',
+			OutputExpectedErr: BadFormatErrorf("found unexpected byte(%c) in stream while expecting byte(%c)", '$', '*'),
+		},
+		{
+			name:              "reader returns an error",
+			inputReader:       reader(""),
+			inputExpectedByte: '*',
+			OutputExpectedErr: io.EOF,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := expectNextByte(test.inputReader, test.inputExpectedByte)
+			require.Equal(test.OutputExpectedErr, err)
+		})
+	}
+}
+
+func TestUtil_ReadLine(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name               string
+		inputReader        *bufio.Reader
+		outputExpectedLine string
+		outputExpectedErr  error
+	}{
+		{
+			name:               "reads the remainder of the line of ASCII encoded string",
+			inputReader:        reader("123\r\n"),
+			outputExpectedLine: "123",
+			outputExpectedErr:  nil,
+		},
+		{
+			name:               "reads only up to the first CRLF",
+			inputReader:        reader("123\r\n456\r\n"),
+			outputExpectedLine: "123",
+			outputExpectedErr:  nil,
+		},
+		{
+			name:               "returns an error if we stop reading before the CRLF",
+			inputReader:        reader("123"),
+			outputExpectedLine: "",
+			outputExpectedErr:  io.EOF,
+		},
+		{
+			name:               "returns an error if the line is empty",
+			inputReader:        reader("\r\n"),
+			outputExpectedLine: "",
+			outputExpectedErr:  BadFormatErrorf("unexpected empty line"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			line, err := readLine(test.inputReader)
+			require.Equal(test.outputExpectedLine, line)
+			require.Equal(test.outputExpectedErr, err)
+		})
+	}
+}
+
+func TestUtil_ReadLength(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name                 string
+		inputReader          *bufio.Reader
+		outputExpectedLength int
+		outputExpectedErr    error
+	}{
+		{
+			name:                 "reads a valid length",
+			inputReader:          reader("123\r\n"),
+			outputExpectedLength: 123,
+			outputExpectedErr:    nil,
+		},
+		{
+			name:                 "returns an error if the length is not a valid integer",
+			inputReader:          reader("a123\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("invalid length: a123"),
+		},
+		{
+			name:                 "returns an error if the length is negative",
+			inputReader:          reader("-123\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("invalid length: -123"),
+		},
+		{
+			name:                 "returns an error if the length is decimal",
+			inputReader:          reader("123.5\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("invalid length: 123.5"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			length, err := readLength(test.inputReader)
+			require.Equal(test.outputExpectedLength, length)
+			require.Equal(test.outputExpectedErr, err)
+		})
+	}
+}
+
+func TestUtil_ReadArrayLength(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name                 string
+		inputReader          *bufio.Reader
+		outputExpectedLength int
+		outputExpectedErr    error
+	}{
+		{
+			name:                 "reads a valid array length",
+			inputReader:          reader("*3\r\n"),
+			outputExpectedLength: 3,
+			outputExpectedErr:    nil,
+		},
+		{
+			name:                 "returns an error if the array length is not a valid integer",
+			inputReader:          reader("*3a\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("invalid length: 3a"),
+		},
+		{
+			name:                 "returns an error if the array length is negative",
+			inputReader:          reader("*-3\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("invalid length: -3"),
+		},
+		{
+			name:                 "returns an error if the array length is decimal",
+			inputReader:          reader("*3.5\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("invalid length: 3.5"),
+		},
+		{
+			name:                 "returns an error if it does not find the array symbol at the beginning of the line",
+			inputReader:          reader("3\r\n"),
+			outputExpectedLength: 0,
+			outputExpectedErr:    BadFormatErrorf("found unexpected byte(%c) in stream while expecting byte(%c)", '3', '*'),
+		},
+		{
+			name:                 "returns an error if the reader returns an error",
+			inputReader:          reader(""),
+			outputExpectedLength: 0,
+			outputExpectedErr:    io.EOF,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			length, err := readArrayLength(test.inputReader)
+			require.Equal(test.outputExpectedLength, length)
+			require.Equal(test.outputExpectedErr, err)
+		})
+	}
+}
+
+func TestUtil_ConsumeCRLF(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name              string
+		inputReader       *bufio.Reader
+		outputExpectedErr error
+	}{
+		{
+			name:              "consumes the CRLF separator",
+			inputReader:       reader("\r\n"),
+			outputExpectedErr: nil,
+		},
+		{
+			name:              "returns an error if the CRLF separator is not found",
+			inputReader:       reader("abc"),
+			outputExpectedErr: BadFormatErrorf("found unexpected byte(%c) in stream while expecting byte(%c)", 'a', '\r'),
+		},
+		{
+			name:              "returns an error if the CRLF separator is incomplete",
+			inputReader:       reader("\ra"),
+			outputExpectedErr: BadFormatErrorf("found unexpected byte(%c) in stream while expecting byte(%c)", 'a', '\n'),
+		},
+		{
+			name:              "returns an error if the reader returns an error",
+			inputReader:       reader("\r"),
+			outputExpectedErr: io.EOF,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := consumeCRLF(test.inputReader)
+			require.Equal(test.outputExpectedErr, err)
+		})
+	}
+}
+
+func TestUtil_ReadBulkString(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name                 string
+		inputReader          *bufio.Reader
+		inputLimit           int
+		outputExpectedString string
+		outputExpectedErr    error
+	}{
+		{
+			name:                 "reads a valid bulk string",
+			inputReader:          reader("$3\r\nabc\r\n"),
+			inputLimit:           3,
+			outputExpectedString: "abc",
+			outputExpectedErr:    nil,
+		},
+		{
+			name:                 "returns an error if the bulk string is too long",
+			inputReader:          reader("$3\r\nabc\r\n"),
+			inputLimit:           2,
+			outputExpectedString: "",
+			outputExpectedErr:    LimitsErrorf("bulk string length must be less than or equal to 2, got 3"),
+		},
+		{
+			name:                 "returns an error if the bulk string is empty",
+			inputReader:          reader("$0\r\n\r\n"),
+			inputLimit:           1,
+			outputExpectedString: "",
+			outputExpectedErr:    LimitsErrorf("bulk string length must be greater than 0, got 0"),
+		},
+		{
+			name:                 "returns an error if the bulk string length is not a valid integer",
+			inputReader:          reader("$a\r\nabc\r\n"),
+			inputLimit:           3,
+			outputExpectedString: "",
+			outputExpectedErr:    BadFormatErrorf("invalid length: a"),
+		},
+		{
+			name:                 "returns an error if the bulk string length is negative",
+			inputReader:          reader("$-3\r\nabc\r\n"),
+			inputLimit:           3,
+			outputExpectedString: "",
+			outputExpectedErr:    BadFormatErrorf("invalid length: -3"),
+		},
+		{
+			name:                 "returns an error if the bulk string length is decimal",
+			inputReader:          reader("$3.5\r\nabc\r\n"),
+			inputLimit:           3,
+			outputExpectedString: "",
+			outputExpectedErr:    BadFormatErrorf("invalid length: 3.5"),
+		},
+		{
+			name:                 "returns an error if it does not find the bulk string symbol at the beginning of the line",
+			inputReader:          reader("3\r\nabc\r\n"),
+			inputLimit:           3,
+			outputExpectedString: "",
+			outputExpectedErr:    BadFormatErrorf("found unexpected byte(%c) in stream while expecting byte(%c)", '3', '$'),
+		},
+		{
+			name:                 "returns an error if the reader returns an error",
+			inputReader:          reader("$3\r\n"),
+			inputLimit:           3,
+			outputExpectedString: "",
+			outputExpectedErr:    io.EOF,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			string, err := readBulkString(test.inputReader, test.inputLimit)
+			require.Equal(test.outputExpectedString, string)
+			require.Equal(test.outputExpectedErr, err)
+		})
+	}
+}
+
+func TestUtil_ReadBulkBytes(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name                    string
+		bytesToRead             []byte
+		inputReader             *bufio.Reader
+		inputBuffer             []byte
+		inputLimit              int
+		outputExpectedBytesRead int
+		outputExpectedErr       error
+	}{
+		{
+			name:                    "reads a valid bulk of bytes",
+			bytesToRead:             []byte("abc"),
+			inputReader:             reader("$3\r\nabc\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              3,
+			outputExpectedBytesRead: 3,
+			outputExpectedErr:       nil,
+		},
+		{
+			name:                    "returns an error if the bulk bytes is too long",
+			bytesToRead:             []byte{},
+			inputReader:             reader("$3\r\nabc\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              2,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       LimitsErrorf("bulk string length must be less than or equal to 2, got 3"),
+		},
+		{
+			name:                    "returns an error if the bulk bytes is empty",
+			bytesToRead:             []byte{},
+			inputReader:             reader("$0\r\n\r\n"),
+			inputBuffer:             make([]byte, 1),
+			inputLimit:              1,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       LimitsErrorf("bulk string length must be greater than 0, got 0"),
+		},
+		{
+			name:                    "returns an error if the bulk bytes length is not a valid integer",
+			bytesToRead:             []byte{},
+			inputReader:             reader("$a\r\nabc\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              3,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       BadFormatErrorf("invalid length: a"),
+		},
+		{
+			name:                    "returns an error if the bulk bytes length is negative",
+			bytesToRead:             []byte{},
+			inputReader:             reader("$-3\r\nabc\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              3,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       BadFormatErrorf("invalid length: -3"),
+		},
+		{
+			name:                    "returns an error if the bulk bytes length is decimal",
+			bytesToRead:             []byte{},
+			inputReader:             reader("$3.5\r\nabc\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              3,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       BadFormatErrorf("invalid length: 3.5"),
+		},
+		{
+			name:                    "returns an error if it does not find the bulk string symbol at the beginning of the line",
+			bytesToRead:             []byte{},
+			inputReader:             reader("3\r\nabc\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              3,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       BadFormatErrorf("found unexpected byte(%c) in stream while expecting byte(%c)", '3', '$'),
+		},
+		{
+			name:                    "returns an error if the reader returns an error",
+			bytesToRead:             []byte{},
+			inputReader:             reader("$3\r\n"),
+			inputBuffer:             make([]byte, 3),
+			inputLimit:              3,
+			outputExpectedBytesRead: 0,
+			outputExpectedErr:       io.EOF,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bytesRead, err := readBulkBytes(test.inputReader, test.inputBuffer, test.inputLimit)
+			require.Equal(test.outputExpectedBytesRead, bytesRead)
+			require.Equal(test.outputExpectedErr, err)
+			require.Equal(test.bytesToRead, test.inputBuffer[:bytesRead])
+		})
+	}
+}
+
+func TestUtil_IsValidID(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name           string
+		inputID        string
+		outputExpected bool
+	}{
+		{
+			name:           "returns true if the ID is valid",
+			inputID:        "123-456",
+			outputExpected: true,
+		},
+		{
+			name:           "returns false if the ID has more than one hyphen",
+			inputID:        "123-456-789",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the ID only contains milliseconds",
+			inputID:        "123456789",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the ID is empty",
+			inputID:        "",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the sequence number is not a valid integer",
+			inputID:        "123-abc",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds are not a valid integer",
+			inputID:        "abc-123",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds are negative",
+			inputID:        "-123-456",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the sequence number is negative",
+			inputID:        "123--456",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds are decimal",
+			inputID:        "123.456-456",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the sequence number is decimal",
+			inputID:        "123-456.789",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds are too large",
+			inputID:        "112345678901234567890-456",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the sequence number is too large",
+			inputID:        "123-112345678901234567890",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds are empty",
+			inputID:        "-456",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the sequence number is empty",
+			inputID:        "123-",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if both the milliseconds and sequence number are empty",
+			inputID:        "-",
+			outputExpected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			isValid := IsValidID(test.inputID)
+			require.Equal(test.outputExpected, isValid)
+		})
+	}
+}
+
+func TestUtil_IsValidIDMillis(t *testing.T) {
+	require := require.New(t)
+
+	tests := []struct {
+		name           string
+		inputMillis    string
+		outputExpected bool
+	}{
+		{
+			name:           "returns true if the milliseconds part is valid",
+			inputMillis:    "1234567890",
+			outputExpected: true,
+		},
+		{
+			name:           "returns false if the milliseconds part is not a valid integer",
+			inputMillis:    "abc",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds part is negative",
+			inputMillis:    "-1234567890",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds part is decimal",
+			inputMillis:    "1234567890.1234567890",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds part is too large",
+			inputMillis:    "1112345678901234567890",
+			outputExpected: false,
+		},
+		{
+			name:           "returns false if the milliseconds part is empty",
+			inputMillis:    "",
+			outputExpected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			isValid := IsValidIDMillis(test.inputMillis)
+			require.Equal(test.outputExpected, isValid)
+		})
+	}
+}
+
+// reader creates a buffered reader from a string.
+func reader(str string) *bufio.Reader {
+	return bufio.NewReader(strings.NewReader(str))
+}
