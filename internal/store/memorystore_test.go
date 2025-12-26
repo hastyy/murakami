@@ -1657,3 +1657,59 @@ func TestMemoryStore_DeleteStream_ConcurrentDeletes(t *testing.T) {
 	require.Equal(int32(1), successCount.Load())
 	require.Equal(int32(4), failureCount.Load())
 }
+
+// Regression test: Ensures that reading after trim correctly handles logical sequence numbers
+// that don't match physical array indices in the LogTree.
+func TestMemoryStore_ReadAfterTrim_LogicalSequenceNumbers(t *testing.T) {
+	require := require.New(t)
+	ctx := context.Background()
+
+	keyGen := newMockKeyGenerator() // Won't be called since we provide explicit MillisID
+	store := NewInMemoryStreamStore(keyGen)
+
+	// Create stream
+	err := store.CreateStream(ctx, protocol.CreateCommand{StreamName: "test-stream"})
+	require.NoError(err)
+
+	// Append 5 records with the same key "1000"
+	// These will have IDs: 1000-0, 1000-1, 1000-2, 1000-3, 1000-4
+	appendCmd := protocol.AppendCommand{
+		StreamName: "test-stream",
+		Records:    [][]byte{[]byte("record0"), []byte("record1"), []byte("record2"), []byte("record3"), []byte("record4")},
+		Options: protocol.AppendCommandOptions{
+			MillisID: "1000",
+		},
+	}
+	lastID, err := store.AppendRecords(ctx, appendCmd)
+	require.NoError(err)
+	require.Equal("1000-4", lastID)
+
+	// Trim to remove records before "1000-2" (removes 1000-0 and 1000-1)
+	trimCmd := protocol.TrimCommand{
+		StreamName: "test-stream",
+		Options: protocol.TrimCommandOptions{
+			MinID: "1000-2",
+		},
+	}
+	err = store.TrimStream(ctx, trimCmd)
+	require.NoError(err)
+
+	// Now read starting from "1000-2" with a large limit
+	// Should get 3 records (1000-2, 1000-3, 1000-4) because sequence numbers are logical
+	readCmd := protocol.ReadCommand{
+		StreamName: "test-stream",
+		Options: protocol.ReadCommandOptions{
+			MinID: "1000-2",
+			Count: 10,
+			Block: 0,
+		},
+	}
+	records, err := store.ReadRecords(ctx, readCmd)
+	require.NoError(err)
+
+	// Verify we get all 3 remaining records with correct logical sequence numbers
+	require.Equal(3, len(records), "Expected 3 records (1000-2, 1000-3, 1000-4) but got %d", len(records))
+	require.Equal("1000-2", records[0].ID)
+	require.Equal("1000-3", records[1].ID)
+	require.Equal("1000-4", records[2].ID)
+}

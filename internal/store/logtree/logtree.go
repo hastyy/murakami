@@ -33,15 +33,23 @@ import (
 // Nodes also store the length of their subtree, which is the sum of the lengths of their children's subtrees.
 // Leaf nodes length is equal to the length of their values slice.
 //
+// Leaf nodes also track the sequence number of their first value via firstSeqNum.
+// This is used to map logical sequence numbers (from IDs like "1000-2") to physical array indices.
+// For example, if firstSeqNum=2 and values=[v2, v3, v4], then:
+//   - values[0] has logical seqNum=2
+//   - values[1] has logical seqNum=3
+//   - values[2] has logical seqNum=4
+//
 // The node invariant is as follows:
 // Given node n:
 // - len(n.children) > 0 <-> len(n.values) == 0
 // - len(n.values) > 0 <-> len(n.children) == 0
 type node[T any] struct {
-	key      Key
-	children []*node[T]
-	values   []T
-	length   int
+	key         Key
+	children    []*node[T]
+	values      []T
+	firstSeqNum int
+	length      int
 }
 
 // readStackEntry is used to store the nodes and values that need to be read from the tree.
@@ -56,9 +64,8 @@ type readStackEntry[T any] struct {
 // It acts as an in-memory append-only log with extra queriable properties.
 // It always has a sentinel root node which never counts towards the length of the tree.
 type LogTree[T any] struct {
-	root       *node[T]
-	lastKey    Key
-	lastSeqNum int
+	root    *node[T]
+	lastKey Key
 }
 
 func New[T any]() *LogTree[T] {
@@ -82,15 +89,6 @@ func (tree *LogTree[T]) Append(key Key, values []T) {
 		assert.OK(tree.root.key == "", "root key is not empty")
 		assert.OK(len(tree.root.values) == 0, "root has values")
 		assert.OK(tree.Length() == initialLength+len(values), "tree length is not incremented correctly")
-
-		// Guaranteed to be a leaf node after an append operation.
-		// The other alternative is to return the root node for an empty tree, which is never the case
-		// after an append operation.
-		rightmostLeaf := tree.rightmostNode()
-
-		// The length of the rightmost leaf is the number of values in the tree.
-		// We subtract 1 because the length is 0-based (like the index of the values slice) and the last sequence number is 1-based.
-		tree.lastSeqNum = rightmostLeaf.length - 1
 	}()
 
 	// Starting at the root, we navigate down the tree using the provided key until we
@@ -139,7 +137,7 @@ func (tree *LogTree[T]) Append(key Key, values []T) {
 		//
 		// NOTE: To have a 0-length prefix overlap can be reduced to having a different 1st character
 		// 		in the key.
-		currNode.children = append(currNode.children, &node[T]{key: key, values: values, length: len(values)})
+		currNode.children = append(currNode.children, &node[T]{key: key, values: values, firstSeqNum: 0, length: len(values)})
 		currNode.length += len(values) // Increment root's length since we added new values
 		return
 	}
@@ -168,7 +166,7 @@ func (tree *LogTree[T]) Append(key Key, values []T) {
 		// whose key is the remaining part of the key.
 		// We also know that in order to get into this branch we had to escape the loop earlier in the case where currNode.key
 		// is prefix of key, but the rightmost child's key doesn't overlap the remaining key portion.
-		currNode.children = append(currNode.children, &node[T]{key: key[prefixLength:], values: values, length: len(values)})
+		currNode.children = append(currNode.children, &node[T]{key: key[prefixLength:], values: values, firstSeqNum: 0, length: len(values)})
 		currNode.length += len(values) // Increment length since we added a new child with values
 		return
 	}
@@ -185,9 +183,9 @@ func (tree *LogTree[T]) Append(key Key, values []T) {
 	// The split node always ends up with two children.
 	children := currNode.children
 	currNode.children = make([]*node[T], 2)
-	currNode.children[0] = &node[T]{key: suffixKey, children: children, values: currNode.values, length: currNode.length} // Preserve the length in the left child
-	currNode.children[1] = &node[T]{key: key[prefixLength:], values: values, length: len(values)}                         // New right child holds the new values
-	currNode.length += len(values)                                                                                        // Increment length since we added new values
+	currNode.children[0] = &node[T]{key: suffixKey, children: children, values: currNode.values, firstSeqNum: currNode.firstSeqNum, length: currNode.length} // Preserve the length and firstSeqNum in the left child
+	currNode.children[1] = &node[T]{key: key[prefixLength:], values: values, firstSeqNum: 0, length: len(values)}                                            // New right child holds the new values
+	currNode.length += len(values)                                                                                                                           // Increment length since we added new values
 
 	currNode.key = prefixKey
 	currNode.values = nil
@@ -207,7 +205,8 @@ func (tree *LogTree[T]) Read(from Key, seqNum int, limit int) []T {
 	}()
 
 	// If the provided key+seqNum is greater than the last key+seqNum, then there are no entries to read.
-	if from > tree.lastKey || (from == tree.lastKey && seqNum > tree.lastSeqNum) {
+	lastKey, lastSeqNum := tree.LastPosition()
+	if from > lastKey || (from == lastKey && seqNum > lastSeqNum) {
 		return nil
 	}
 
@@ -224,7 +223,12 @@ func (tree *LogTree[T]) Read(from Key, seqNum int, limit int) []T {
 		remainingChildren := currNode.children[min(len(currNode.children), idx+1):]
 		remainingValues := currNode.values
 		if len(remainingValues) > 0 && exactKeyMatch {
-			remainingValues = remainingValues[min(len(remainingValues), seqNum):]
+			// Convert logical seqNum to physical array index using firstSeqNum
+			physicalIndex := seqNum - currNode.firstSeqNum
+			if physicalIndex < 0 {
+				physicalIndex = 0
+			}
+			remainingValues = remainingValues[min(len(remainingValues), physicalIndex):]
 		}
 
 		stack.Push(&readStackEntry[T]{
@@ -314,8 +318,14 @@ func (tree *LogTree[T]) Length() int {
 }
 
 // LastPosition returns the last key and sequence number in the tree.
+// The sequence number is calculated from the rightmost leaf's firstSeqNum + number of values - 1.
 func (tree *LogTree[T]) LastPosition() (Key, int) {
-	return tree.lastKey, tree.lastSeqNum
+	if tree.Length() == 0 {
+		return "", -1
+	}
+	rightmostLeaf := tree.rightmostNode()
+	lastSeqNum := rightmostLeaf.firstSeqNum + len(rightmostLeaf.values) - 1
+	return tree.lastKey, lastSeqNum
 }
 
 // findNodeIndexWithKeyGreaterOrEqualThan finds the index of the node with the key greater than or equal to the provided key.
@@ -363,9 +373,18 @@ func trimNode[T any](n *node[T], until Key, seqNum int, exactKeyMatch bool) int 
 	// If this is a leaf node, trim values if we have an exact key match
 	if len(n.children) == 0 {
 		if exactKeyMatch && len(n.values) > 0 {
-			// Trim values at indices [0:seqNum] (preserve value at seqNum)
-			trimCount := min(seqNum, len(n.values))
+			// Convert logical seqNum to physical array index using firstSeqNum
+			// We want to remove all values with logical seqNum < requested seqNum
+			// So if firstSeqNum=2 and seqNum=4, we remove values at physical indices [0, 1]
+			// (which have logical seqNums 2, 3)
+			physicalIndex := seqNum - n.firstSeqNum
+			if physicalIndex <= 0 {
+				// seqNum is before or at the first value in this node, nothing to trim
+				return 0
+			}
+			trimCount := min(physicalIndex, len(n.values))
 			n.values = n.values[trimCount:]
+			n.firstSeqNum += trimCount // Update firstSeqNum after trimming
 			n.length -= trimCount
 			return trimCount
 		}

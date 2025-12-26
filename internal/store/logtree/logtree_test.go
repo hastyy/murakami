@@ -373,10 +373,11 @@ func TestTrimPreservesExactKeyAndSeqNum(t *testing.T) {
 		t.Errorf("Expected third entry to be 'f', got %s", entries[2])
 	}
 
-	// Trim at another exact position: key "3000000000000", seqNum 1
-	// After the first trim, "d" is now at seqNum 0 and "e" is at seqNum 1
-	// This should remove "d" (now at seqNum 0), and preserve "e" (at seqNum 1) and "f"
-	tree.Trim(Key("3000000000000"), 1)
+	// Trim at another exact position: key "3000000000000", seqNum 2
+	// After the first trim, "d" still has logical seqNum=1 and "e" still has logical seqNum=2
+	// (sequence numbers are logical and don't change after trimming)
+	// This should remove "d" (seqNum 1), and preserve "e" (seqNum 2) and "f"
+	tree.Trim(Key("3000000000000"), 2)
 
 	if tree.Length() != 2 {
 		t.Errorf("Expected tree length to be 2 after second trim, got %d", tree.Length())
@@ -387,7 +388,7 @@ func TestTrimPreservesExactKeyAndSeqNum(t *testing.T) {
 		t.Errorf("Expected 2 entries after second trim, got %d", len(entries))
 	}
 
-	// Verify the exact value at the second trim position (seqNum 1) is preserved
+	// Verify the exact value at the second trim position (seqNum 2) is preserved
 	if entries[0] != "e" {
 		t.Errorf("Expected first entry to be 'e' (the value at exact second trim position), got %s", entries[0])
 	}
