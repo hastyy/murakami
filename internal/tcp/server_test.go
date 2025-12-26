@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func (e *mockTimeoutError) Timeout() bool   { return true }
 func (e *mockTimeoutError) Temporary() bool { return true }
 
 type mockConn struct {
-	closed bool
+	closed atomic.Bool
 }
 
 func newMockConn() *mockConn {
@@ -71,7 +72,7 @@ func (c *mockConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *mockConn) Close() error {
-	c.closed = true
+	c.closed.Store(true)
 	return nil
 }
 
@@ -461,7 +462,7 @@ func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
 
 	// Verify all connections were properly closed
 	for _, conn := range conns {
-		require.True(conn.closed)
+		require.True(conn.closed.Load())
 	}
 }
 

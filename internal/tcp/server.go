@@ -256,6 +256,29 @@ func (s *Server) acceptLoop(h Handler) error {
 			// Reset the backoff delay
 			acceptDelay = 0
 
+			// TODO: Fix race condition here.
+			// I need to hold the lock here and confirm the server state is still running.
+			// if it's not, we should close the connection and either return or loop again
+			// to find s.stopCh has been closed.
+			//
+			// We should also move the wg.Add(1) here before spawning the new goroutine.
+			// And let the first line in handle() be the defer wg.Done().
+			//
+			// wg.Add(1) should be done while still holding the lock.
+			// Spawning the goroutine can be done after we release the lock.
+			//
+			// EXAMPLE:
+			// // After successful Accept()
+			// s.mu.Lock()
+			// if s.state == stopped {
+			//     s.mu.Unlock()
+			//     conn.Close()
+			//     return nil
+			// }
+			// s.connWg.Add(1)
+			// s.mu.Unlock()
+			// go s.handle(...)
+
 			// Handle the connection in a new goroutine to continue accepting new connections
 			//
 			// NOTE: Should we introduce a Scheduler abstraction here to control goroutine scheduling

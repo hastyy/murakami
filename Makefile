@@ -1,4 +1,4 @@
-.PHONY: build run fmt lint vet test clean
+.PHONY: build run fmt lint vet test test-race clean
 
 BINARY_NAME=murakami-server
 BIN_DIR=bin
@@ -26,6 +26,10 @@ vet:
 test:
 	@echo "Testing..."
 	@go test -v ./...
+
+test-race:
+	@echo "Testing with race detector..."
+	@go test -race -v ./...
 
 clean:
 	@echo "Cleaning..."
