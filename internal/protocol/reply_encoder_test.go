@@ -82,64 +82,6 @@ func TestEncodeError(t *testing.T) {
 	}
 }
 
-func TestEncodeBulkString(t *testing.T) {
-	encoder := NewReplyEncoder()
-
-	tests := []struct {
-		name           string
-		value          string
-		expectedOutput string
-	}{
-		{
-			name:           "successfully encodes simple bulk string",
-			value:          "hello",
-			expectedOutput: "$5\r\nhello\r\n",
-		},
-		{
-			name:           "successfully encodes bulk string with spaces",
-			value:          "hello world",
-			expectedOutput: "$11\r\nhello world\r\n",
-		},
-		{
-			name:           "successfully encodes bulk string with special characters",
-			value:          "hello\nworld\ttab",
-			expectedOutput: "$15\r\nhello\nworld\ttab\r\n",
-		},
-		{
-			name:           "successfully encodes bulk string with CRLF",
-			value:          "line1\r\nline2",
-			expectedOutput: "$12\r\nline1\r\nline2\r\n",
-		},
-		{
-			name:           "successfully encodes long bulk string",
-			value:          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.",
-			expectedOutput: "$191\r\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\r\n",
-		},
-		{
-			name:           "successfully encodes ID format string",
-			value:          "1700000001234-0",
-			expectedOutput: "$15\r\n1700000001234-0\r\n",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			require := require.New(t)
-
-			var buf bytes.Buffer
-			writer := bufio.NewWriter(&buf)
-
-			err := encoder.EncodeBulkString(writer, test.value)
-			require.NoError(err)
-
-			err = writer.Flush()
-			require.NoError(err)
-
-			require.Equal(test.expectedOutput, buf.String())
-		})
-	}
-}
-
 func TestEncodeRecords(t *testing.T) {
 	encoder := NewReplyEncoder()
 

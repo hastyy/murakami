@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"bufio"
-	"strconv"
 )
 
 const ReplyOK = "+OK\r\n"
@@ -36,27 +35,7 @@ func (e *ReplyEncoder) EncodeError(w *bufio.Writer, error Error) error {
 // EncodeBulkString encodes a bulk string response in the format "$length\r\nvalue\r\n".
 // Used for successful APPEND operations to return the generated record ID.
 func (e *ReplyEncoder) EncodeBulkString(w *bufio.Writer, value string) error {
-	err := w.WriteByte(symbolBulkString)
-	if err != nil {
-		return err
-	}
-	_, err = w.WriteString(strconv.Itoa(len(value)))
-	if err != nil {
-		return err
-	}
-	_, err = w.WriteString(separatorCRLF)
-	if err != nil {
-		return err
-	}
-	_, err = w.WriteString(value)
-	if err != nil {
-		return err
-	}
-	_, err = w.WriteString(separatorCRLF)
-	if err != nil {
-		return err
-	}
-	return nil
+	return writeBulkString(w, value)
 }
 
 // EncodeRecords encodes an array of records in the format "*count*2\r\n$id_len\r\nid\r\n$val_len\r\nvalue\r\n...".
@@ -64,61 +43,21 @@ func (e *ReplyEncoder) EncodeBulkString(w *bufio.Writer, value string) error {
 // The array length is records * 2 to account for this pairing.
 // Used for successful READ operations to return matching records.
 func (e *ReplyEncoder) EncodeRecords(w *bufio.Writer, records []Record) error {
-	err := w.WriteByte(symbolArray)
-	if err != nil {
-		return err
-	}
 	// Array length is records * 2 because we encode [id1, record1, id2, record2, ...]
-	_, err = w.WriteString(strconv.Itoa(len(records) * 2))
-	if err != nil {
-		return err
-	}
-	_, err = w.WriteString(separatorCRLF)
+	err := encodeArrayHeader(w, len(records)*2)
 	if err != nil {
 		return err
 	}
 
 	for _, record := range records {
 		// Encode ID as bulk string
-		err := w.WriteByte(symbolBulkString)
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(strconv.Itoa(len(record.ID)))
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(separatorCRLF)
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(record.ID)
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(separatorCRLF)
+		err := writeBulkString(w, record.ID)
 		if err != nil {
 			return err
 		}
 
-		// Encode Value as bulk string
-		err = w.WriteByte(symbolBulkString)
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(strconv.Itoa(len(record.Value)))
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(separatorCRLF)
-		if err != nil {
-			return err
-		}
-		_, err = w.Write(record.Value)
-		if err != nil {
-			return err
-		}
-		_, err = w.WriteString(separatorCRLF)
+		// Encode Value as bulk bytes
+		err = writeBulkBytes(w, record.Value)
 		if err != nil {
 			return err
 		}

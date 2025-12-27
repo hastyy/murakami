@@ -4,10 +4,6 @@
 
 REFACTOR:
 
-- FIX: logtree internal seqNum is broken because it relies on array indexes for entries in the same key. I need to remove seqNum as a concept internally and do the extra filtering at the store layer, I guess?
-- FIX: MemoryStore.Append(), instead of calling log.LastPosition() should call something like log.LastRecord().ID since we can't rely on array indexes for the seqNum
-- FIX: server race condition
-
 - Refactor: Delayer + Listener interfaces for tcp.Server (instead of passing it functions); Delayer.Bakcoff(), Delayer.Reset(), Listener.Listen()
 
 - Introduce structured logging (for later tracing and debugging) https://claude.ai/chat/e89d7de0-ffa6-46d3-9a50-2d4b4984534b

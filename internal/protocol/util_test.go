@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"strings"
 	"testing"
@@ -540,6 +541,183 @@ func TestUtil_IsValidIDMillis(t *testing.T) {
 			require.Equal(test.outputExpected, isValid)
 		})
 	}
+}
+
+func TestUtil_encodeArrayHeader(t *testing.T) {
+	require := require.New(t)
+
+	var buf bytes.Buffer
+	writer := bufio.NewWriter(&buf)
+
+	err := encodeArrayHeader(writer, 1000)
+	require.NoError(err)
+
+	err = writer.Flush()
+	require.NoError(err)
+
+	require.Equal("*1000\r\n", buf.String())
+}
+
+func TestUtil_encodeArrayHeader_WriterError(t *testing.T) {
+	require := require.New(t)
+
+	// Create a writer with a very small buffer to force immediate writes
+	failingWriter := &failingWriter{failAfter: 0}
+	writer := bufio.NewWriterSize(failingWriter, 1)
+
+	err := encodeArrayHeader(writer, 3)
+	require.Error(err)
+	require.Equal(io.ErrShortWrite, err)
+}
+
+func TestUtil_writeBulkString(t *testing.T) {
+	tests := []struct {
+		name           string
+		value          string
+		expectedOutput string
+	}{
+		{
+			name:           "successfully encodes simple bulk string",
+			value:          "hello",
+			expectedOutput: "$5\r\nhello\r\n",
+		},
+		{
+			name:           "successfully encodes bulk string with spaces",
+			value:          "hello world",
+			expectedOutput: "$11\r\nhello world\r\n",
+		},
+		{
+			name:           "successfully encodes bulk string with special characters",
+			value:          "hello\nworld\ttab",
+			expectedOutput: "$15\r\nhello\nworld\ttab\r\n",
+		},
+		{
+			name:           "successfully encodes bulk string with CRLF",
+			value:          "line1\r\nline2",
+			expectedOutput: "$12\r\nline1\r\nline2\r\n",
+		},
+		{
+			name:           "successfully encodes long bulk string",
+			value:          "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.",
+			expectedOutput: "$191\r\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\r\n",
+		},
+		{
+			name:           "successfully encodes ID format string",
+			value:          "1700000001234-0",
+			expectedOutput: "$15\r\n1700000001234-0\r\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require := require.New(t)
+
+			var buf bytes.Buffer
+			writer := bufio.NewWriter(&buf)
+
+			err := writeBulkString(writer, test.value)
+			require.NoError(err)
+
+			err = writer.Flush()
+			require.NoError(err)
+
+			require.Equal(test.expectedOutput, buf.String())
+		})
+	}
+}
+
+func TestUtil_writeBulkString_WriterError(t *testing.T) {
+	require := require.New(t)
+
+	// Create a writer with a very small buffer to force immediate writes
+	failingWriter := &failingWriter{failAfter: 0}
+	writer := bufio.NewWriterSize(failingWriter, 1)
+
+	err := writeBulkString(writer, "test")
+	require.Error(err)
+	require.Equal(io.ErrShortWrite, err)
+}
+
+func TestUtil_writeBulkBytes(t *testing.T) {
+	tests := []struct {
+		name           string
+		value          []byte
+		expectedOutput string
+	}{
+		{
+			name:           "simple bytes",
+			value:          []byte("hello"),
+			expectedOutput: "$5\r\nhello\r\n",
+		},
+		{
+			name:           "empty bytes",
+			value:          []byte{},
+			expectedOutput: "$0\r\n\r\n",
+		},
+		{
+			name:           "bytes with CRLF",
+			value:          []byte("line1\r\nline2"),
+			expectedOutput: "$12\r\nline1\r\nline2\r\n",
+		},
+		{
+			name:           "binary data",
+			value:          []byte{0x00, 0x01, 0x02, 0xFF},
+			expectedOutput: "$4\r\n\x00\x01\x02\xFF\r\n",
+		},
+		{
+			name:           "unicode bytes",
+			value:          []byte("hello世界"),
+			expectedOutput: "$11\r\nhello世界\r\n",
+		},
+		{
+			name:           "single byte",
+			value:          []byte("a"),
+			expectedOutput: "$1\r\na\r\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require := require.New(t)
+
+			var buf bytes.Buffer
+			writer := bufio.NewWriter(&buf)
+
+			err := writeBulkBytes(writer, test.value)
+			require.NoError(err)
+
+			err = writer.Flush()
+			require.NoError(err)
+
+			require.Equal(test.expectedOutput, buf.String())
+		})
+	}
+}
+
+func TestUtil_writeBulkBytes_WriterError(t *testing.T) {
+	require := require.New(t)
+
+	// Create a writer with a very small buffer to force immediate writes
+	failingWriter := &failingWriter{failAfter: 0}
+	writer := bufio.NewWriterSize(failingWriter, 1)
+
+	err := writeBulkBytes(writer, []byte("test"))
+	require.Error(err)
+	require.Equal(io.ErrShortWrite, err)
+}
+
+// failingWriter is a mock writer that always fails
+type failingWriter struct {
+	writeCount int
+	failAfter  int
+}
+
+func (fw *failingWriter) Write(p []byte) (n int, err error) {
+	if fw.writeCount >= fw.failAfter {
+		return 0, io.ErrShortWrite
+	}
+	fw.writeCount++
+	return len(p), nil
 }
 
 // reader creates a buffered reader from a string.

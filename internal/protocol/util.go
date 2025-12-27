@@ -205,3 +205,93 @@ func IsValidID(id string) bool {
 func IsValidIDMillis(millis string) bool {
 	return idMillisRegex.MatchString(millis)
 }
+
+// encodeArrayHeader encodes an array header to the provided writer.
+// The format is: *<length>\r\n
+// This is used by both the command encoder (client-side) and reply encoder (server-side)
+// to write array headers before encoding array elements.
+// Returns any I/O error encountered during writing.
+func encodeArrayHeader(w *bufio.Writer, length int) error {
+	err := w.WriteByte(symbolArray)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(strconv.Itoa(length))
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(separatorCRLF)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// writeBulkString writes a string as a bulk string to the provided writer.
+// The format is: $<length>\r\n<value>\r\n
+// This is used by both the command encoder (client-side) and reply encoder (server-side).
+// Returns any I/O error encountered during writing.
+func writeBulkString(w *bufio.Writer, value string) error {
+	err := w.WriteByte(symbolBulkString)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(strconv.Itoa(len(value)))
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(separatorCRLF)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(value)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(separatorCRLF)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// writeBulkBytes writes a byte slice as a bulk string to the provided writer.
+// The format is: $<length>\r\n<bytes>\r\n
+// This is the counterpart to readBulkBytes and is used to encode binary record data.
+// Returns any I/O error encountered during writing.
+func writeBulkBytes(w *bufio.Writer, value []byte) error {
+	err := w.WriteByte(symbolBulkString)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(strconv.Itoa(len(value)))
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(separatorCRLF)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Write(value)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.WriteString(separatorCRLF)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
