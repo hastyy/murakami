@@ -19,8 +19,8 @@ func TestAttach(t *testing.T) {
 
 	// Create a mock connection using net.Pipe
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 
 	// Attach the connection
 	c.Attach(serverConn)
@@ -33,7 +33,7 @@ func TestAttach(t *testing.T) {
 	// Verify the buffered reader can read from the connection
 	// Write from client side
 	go func() {
-		clientConn.Write([]byte("test"))
+		_, _ = clientConn.Write([]byte("test"))
 	}()
 
 	buf := make([]byte, 4)
@@ -49,8 +49,8 @@ func TestDetach(t *testing.T) {
 	// Create and attach a Connection
 	c := NewConnection(1024, 1024)
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 
 	c.Attach(serverConn)
 
@@ -72,8 +72,8 @@ func TestResetLimits(t *testing.T) {
 	// Create and attach a Connection
 	c := NewConnection(1024, 1024)
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 
 	c.Attach(serverConn)
 

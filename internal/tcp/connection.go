@@ -69,8 +69,11 @@ func (c *Connection) Detach() {
 // This should be called before each request/response exchange to enforce fresh limits and timeouts.
 func (c *Connection) ResetLimits() {
 	c.lreader.N = int64(c.breader.Size())
-	c.conn.SetReadDeadline(time.Now().Add(DEFAULT_CONNECTION_READ_DEADLINE))
-	c.conn.SetWriteDeadline(time.Now().Add(DEFAULT_CONNECTION_WRITE_DEADLINE))
+	// Deadline errors are ignored because they rarely fail in practice and typically only occur
+	// when the connection is already closed or invalid (syscall.EINVAL, io.ErrClosedPipe).
+	// If the connection is dead, subsequent I/O operations will fail with appropriate errors anyway.
+	_ = c.conn.SetReadDeadline(time.Now().Add(DEFAULT_CONNECTION_READ_DEADLINE))
+	_ = c.conn.SetWriteDeadline(time.Now().Add(DEFAULT_CONNECTION_WRITE_DEADLINE))
 }
 
 // Read reads data from the underlying connection into the given buffer through the buffered reader.

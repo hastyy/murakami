@@ -305,7 +305,11 @@ func (c *Controller) handleDeleteCommand(ctx context.Context, conn *tcp.Connecti
 func (c *Controller) handleError(err error, conn *tcp.Connection) (close bool) {
 	if perr, ok := protocol.IsProtocolError(err); ok {
 		c.slog.Debug("protocol error", "error", perr)
-		c.encoder.EncodeError(conn.BufferedWriter(), perr)
+		err := c.encoder.EncodeError(conn.BufferedWriter(), perr)
+		if err != nil {
+			c.slog.Error("failed to encode error response", "encode_error", err, "protocol_error", perr)
+			return true // Close connection if we can't send error response
+		}
 		return !perr.IsRecoverable() // If the error is not recoverable, close the connection
 	}
 	c.slog.Error("error decoding command", "error", err)

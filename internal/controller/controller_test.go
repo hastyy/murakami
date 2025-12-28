@@ -519,6 +519,34 @@ func TestHandle_CreateStream_EncodeOKError(t *testing.T) {
 	require.True(store.createStreamCalled)
 }
 
+func TestHandle_EncodeErrorFailure(t *testing.T) {
+	require := require.New(t)
+
+	// Setup a scenario where decoding fails with a protocol error
+	decoder := &mockCommandDecoder{
+		spec: protocol.CommandSpec{
+			Name:       protocol.CommandCreate,
+			ArgsLength: 2,
+		},
+		decodeCreateCommandError: protocol.LimitsErrorf("stream name too long"),
+	}
+	store := &mockStreamStore{}
+	encoder := &mockReplyEncoder{
+		// Make EncodeError fail
+		encodeErrorError: io.ErrShortWrite,
+	}
+
+	controller := New(store, decoder, encoder, discardLogger)
+
+	conn := tcp.NewConnection(1024, 1024)
+	close := controller.Handle(t.Context(), conn)
+
+	// Should close connection when we can't send error response
+	require.True(close)
+	require.True(encoder.calledEncodeError)
+	require.False(store.createStreamCalled)
+}
+
 func TestHandle_AppendRecords_Errors(t *testing.T) {
 	tests := []struct {
 		name          string

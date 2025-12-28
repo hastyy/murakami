@@ -192,7 +192,7 @@ func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
 		err := s.Start(mockHandler)
 		startErrCh <- err
 	}()
-	defer s.Stop(t.Context())
+	defer func() { _ = s.Stop(t.Context()) }()
 
 	// Wait for server to enter accept loop
 	<-signalEnteredAccept
@@ -515,7 +515,7 @@ func TestStop_ReturnsContextCanceledError(t *testing.T) {
 	})
 
 	// Start server in background
-	go s.Start(mockHandler)
+	go func() { _ = s.Start(mockHandler) }()
 
 	// Wait for all connections to be accepted
 	// At this point, all handlers are running and sleeping for 1 second

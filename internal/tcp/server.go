@@ -256,15 +256,18 @@ func (s *Server) acceptLoop(h Handler) error {
 			// Reset the backoff delay
 			acceptDelay = 0
 
-			// Check if server is stopped before handling the connection
-			// and increment WaitGroup while holding the lock to avoid races with Stop()
-			// which might be already in s.connWg.Wait()
-			s.mu.Lock()
-			if s.state == stopped {
-				s.mu.Unlock()
-				conn.Close()
-				return nil
-			}
+		// Check if server is stopped before handling the connection
+		// and increment WaitGroup while holding the lock to avoid races with Stop()
+		// which might be already in s.connWg.Wait()
+		s.mu.Lock()
+		if s.state == stopped {
+			s.mu.Unlock()
+			// Close error is ignored because we're in shutdown path and there's no handler to report to.
+			// The connection was just accepted, so close failures are rare (typically only syscall.EBADF).
+			// TODO: Log this error when we add a logger to the Server.
+			_ = conn.Close()
+			return nil
+		}
 			s.connWg.Add(1)
 			s.mu.Unlock()
 
@@ -280,7 +283,10 @@ func (s *Server) acceptLoop(h Handler) error {
 
 func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 	defer s.connWg.Done()
-	defer conn.Close()
+	// Close error is ignored in this cleanup defer because we're done with the connection regardless
+	// of whether Close succeeds. Common errors (syscall.EBADF for already-closed connections) aren't actionable.
+	// TODO: Log this error when we add a logger to the Server.
+	defer func() { _ = conn.Close() }()
 
 	c := s.connProvider.Get()
 	defer s.connProvider.Put(c)
@@ -301,7 +307,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 			close := h.Handle(ctx, c)
 
 			// Flush the buffered writer to send the response to the client
-			c.BufferedWriter().Flush()
+			err := c.BufferedWriter().Flush()
+			if err != nil {
+				// If we can't flush the response, close the connection
+				return
+			}
 
 			if close {
 				// If the handler returns close=true, return so we close the connection and
