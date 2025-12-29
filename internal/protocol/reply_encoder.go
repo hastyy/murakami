@@ -4,8 +4,6 @@ import (
 	"bufio"
 )
 
-const ReplyOK = "+OK\r\n"
-
 // ReplyEncoder is the server-side protocol encoder that serializes S3P responses to client byte streams.
 // It encodes success responses (OK, bulk strings, records) and error responses according to the
 // S3P protocol specification. All methods write to a buffered writer and return any I/O errors encountered.
@@ -44,7 +42,7 @@ func (e *ReplyEncoder) EncodeBulkString(w *bufio.Writer, value string) error {
 // Used for successful READ operations to return matching records.
 func (e *ReplyEncoder) EncodeRecords(w *bufio.Writer, records []Record) error {
 	// Array length is records * 2 because we encode [id1, record1, id2, record2, ...]
-	err := encodeArrayHeader(w, len(records)*2)
+	err := writeArrayHeader(w, len(records)*2)
 	if err != nil {
 		return err
 	}

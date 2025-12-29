@@ -15,3 +15,5 @@ REFACTOR:
 - Introduce config (move static values)
 
 - A more advanced version of the protocol should inform the client of version and configured limits upon connection
+
+- Client-side protocol components (command encoder, reply decoder) improvements (implementation + tests) since they were the most AI-involved components

@@ -11,13 +11,8 @@ type AppendReply struct {
 }
 
 type ReadReply struct {
-	RecordSequence []SequencePair
-	Err            Error
-}
-
-type SequencePair struct {
-	ID     string
-	Record []byte
+	Records []Record
+	Err     Error
 }
 
 type TrimReply struct {

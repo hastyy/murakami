@@ -22,4 +22,7 @@ const (
 	optionMinID = "MIN_ID"
 	optionCount = "COUNT"
 	optionBlock = "BLOCK"
+
+	// Reply strings
+	ReplyOK = "+OK\r\n"
 )

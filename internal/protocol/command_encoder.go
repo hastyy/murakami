@@ -23,7 +23,7 @@ func NewCommandEncoder() *CommandEncoder {
 // Returns any I/O error encountered during writing.
 func (e *CommandEncoder) EncodeCreateCommand(w *bufio.Writer, cmd CreateCommand) error {
 	// Write array header: *3\r\n
-	err := encodeArrayHeader(w, 3)
+	err := writeArrayHeader(w, 3)
 	if err != nil {
 		return err
 	}
@@ -41,7 +41,7 @@ func (e *CommandEncoder) EncodeCreateCommand(w *bufio.Writer, cmd CreateCommand)
 	}
 
 	// Write empty options array: *0\r\n
-	err = encodeArrayHeader(w, 0)
+	err = writeArrayHeader(w, 0)
 	if err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func (e *CommandEncoder) EncodeCreateCommand(w *bufio.Writer, cmd CreateCommand)
 // Returns any I/O error encountered during writing.
 func (e *CommandEncoder) EncodeAppendCommand(w *bufio.Writer, cmd AppendCommand) error {
 	// Write array header: *4\r\n
-	err := encodeArrayHeader(w, 4)
+	err := writeArrayHeader(w, 4)
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func (e *CommandEncoder) EncodeAppendCommand(w *bufio.Writer, cmd AppendCommand)
 // Returns any I/O error encountered during writing.
 func (e *CommandEncoder) EncodeReadCommand(w *bufio.Writer, cmd ReadCommand) error {
 	// Write array header: *3\r\n
-	err := encodeArrayHeader(w, 3)
+	err := writeArrayHeader(w, 3)
 	if err != nil {
 		return err
 	}
@@ -130,7 +130,7 @@ func (e *CommandEncoder) EncodeReadCommand(w *bufio.Writer, cmd ReadCommand) err
 // Returns any I/O error encountered during writing.
 func (e *CommandEncoder) EncodeTrimCommand(w *bufio.Writer, cmd TrimCommand) error {
 	// Write array header: *3\r\n
-	err := encodeArrayHeader(w, 3)
+	err := writeArrayHeader(w, 3)
 	if err != nil {
 		return err
 	}
@@ -163,7 +163,7 @@ func (e *CommandEncoder) EncodeTrimCommand(w *bufio.Writer, cmd TrimCommand) err
 // Returns any I/O error encountered during writing.
 func (e *CommandEncoder) EncodeDeleteCommand(w *bufio.Writer, cmd DeleteCommand) error {
 	// Write array header: *3\r\n
-	err := encodeArrayHeader(w, 3)
+	err := writeArrayHeader(w, 3)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (e *CommandEncoder) EncodeDeleteCommand(w *bufio.Writer, cmd DeleteCommand)
 	}
 
 	// Write empty options array: *0\r\n
-	err = encodeArrayHeader(w, 0)
+	err = writeArrayHeader(w, 0)
 	if err != nil {
 		return err
 	}
@@ -193,11 +193,11 @@ func (e *CommandEncoder) EncodeDeleteCommand(w *bufio.Writer, cmd DeleteCommand)
 func (e *CommandEncoder) encodeAppendOptions(w *bufio.Writer, opts AppendCommandOptions) error {
 	if opts.MillisID == "" {
 		// Empty options array
-		return encodeArrayHeader(w, 0)
+		return writeArrayHeader(w, 0)
 	}
 
 	// Options array with 2 elements (key-value pair)
-	err := encodeArrayHeader(w, 2)
+	err := writeArrayHeader(w, 2)
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func (e *CommandEncoder) encodeReadOptions(w *bufio.Writer, opts ReadCommandOpti
 		optCount += 2
 	}
 
-	err := encodeArrayHeader(w, optCount)
+	err := writeArrayHeader(w, optCount)
 	if err != nil {
 		return err
 	}
@@ -274,7 +274,7 @@ func (e *CommandEncoder) encodeReadOptions(w *bufio.Writer, opts ReadCommandOpti
 // encodeTrimOptions encodes the options for a TRIM command
 func (e *CommandEncoder) encodeTrimOptions(w *bufio.Writer, opts TrimCommandOptions) error {
 	// MIN_ID is mandatory for TRIM
-	err := encodeArrayHeader(w, 2)
+	err := writeArrayHeader(w, 2)
 	if err != nil {
 		return err
 	}
@@ -294,7 +294,7 @@ func (e *CommandEncoder) encodeTrimOptions(w *bufio.Writer, opts TrimCommandOpti
 
 // encodeRecordsArray encodes the records array for an APPEND command
 func (e *CommandEncoder) encodeRecordsArray(w *bufio.Writer, records [][]byte) error {
-	err := encodeArrayHeader(w, len(records))
+	err := writeArrayHeader(w, len(records))
 	if err != nil {
 		return err
 	}

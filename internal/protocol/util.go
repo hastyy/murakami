@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"regexp"
 	"strconv"
@@ -33,6 +34,7 @@ func expectNextByte(r *bufio.Reader, expected byte) error {
 
 // readLine reads the remainder of the line content from the reader.
 // This is used for lines we expect to only contain ASCII encoded strings.
+// TODO: Evaluate if this should take in a limit parameter to prevent attack vectors.
 func readLine(r *bufio.Reader) (string, error) {
 	// Reads until the end of the line (should end with CRLF)
 	//
@@ -87,6 +89,37 @@ func readArrayLength(r *bufio.Reader) (int, error) {
 	}
 
 	return length, nil
+}
+
+// readBulkStringLength reads a bulk string length from the protocol stream.
+// Expects the bulk string prefix byte ('$') followed by a valid length (integer >= 0).
+// Returns an error if the format is invalid.
+func readBulkStringLength(r *bufio.Reader) (int, error) {
+	if err := expectNextByte(r, symbolBulkString); err != nil {
+		return 0, err
+	}
+
+	length, err := readLength(r)
+	if err != nil {
+		return 0, err
+	}
+
+	return length, nil
+}
+
+// readBytes reads exactly n bytes from the reader.
+// Returns an error if fewer than n bytes are available or if an I/O error occurs.
+func readBytes(r *bufio.Reader, n int) ([]byte, error) {
+	buf := make([]byte, n)
+
+	bytesRead, err := io.ReadFull(r, buf)
+	if err != nil {
+		return nil, err
+	}
+
+	assert.OK(bytesRead == n, "io.ReadFull() did not read the expected number of bytes, got %d expected %d", bytesRead, n)
+
+	return buf, nil
 }
 
 // consumeCRLF consumes the CRLF separator from the reader.
@@ -162,6 +195,8 @@ func numberOfPairs(arrLength int) int {
 // The buffer is used to store the bytes read from the protocol stream. So the caller should
 // slice the buffer up n in order to get the slice of bytes that was read.
 func readBulkBytes(r *bufio.Reader, buf []byte, limit int) (int, error) {
+	assert.OK(limit > 0, "limit must be greater than 0")
+
 	if err := expectNextByte(r, symbolBulkString); err != nil {
 		return 0, err
 	}
@@ -193,6 +228,66 @@ func readBulkBytes(r *bufio.Reader, buf []byte, limit int) (int, error) {
 	return length, nil
 }
 
+// readSimpleString reads a simple string from the protocol stream.
+// It expects two parts: the first byte must be the simple string symbol (+),
+// followed by ASCII text terminated by CRLF.
+// Returns an error if the format is invalid.
+func readSimpleString(r *bufio.Reader) (string, error) {
+	err := expectNextByte(r, symbolSimpleString)
+	if err != nil {
+		return "", err
+	}
+
+	line, err := readLine(r)
+	if err != nil {
+		return "", err
+	}
+
+	return line, nil
+}
+
+// readError reads a protocol error from the protocol stream.
+// It expects the error format: -<ERROR_CODE> <message>\r\n
+// Returns a protocol Error if successfully parsed, or a decoding error if the format is invalid.
+func readError(r *bufio.Reader) (Error, error) {
+	err := expectNextByte(r, symbolError)
+	if err != nil {
+		return Error{}, err
+	}
+
+	line, err := readLine(r)
+	if err != nil {
+		return Error{}, err
+	}
+
+	// Parse error code and message
+	// Format: <ERROR_CODE> <message>
+	// Error code is up to the first space
+	spaceIdx := strings.Index(line, " ")
+	if spaceIdx == -1 {
+		return Error{}, fmt.Errorf("bad server reply format: expected error code and message separated by space, got: %s", line)
+	}
+
+	code := ErrorCode(line[:spaceIdx])
+	message := line[spaceIdx+1:]
+
+	// Match known error codes and construct appropriate protocol Error
+	switch code {
+	case ErrCodeBadFormat:
+		return BadFormatErrorf("%s", message), nil
+	case ErrCodeLimits:
+		return LimitsErrorf("%s", message), nil
+	case ErrCodeStreamExists:
+		return StreamExistsErrorf("%s", message), nil
+	case ErrCodeUnknownStream:
+		return UnknownStreamErrorf("%s", message), nil
+	case ErrCodeNonMonotonicID:
+		return NonMonotonicIDErrorf("%s", message), nil
+	default:
+		return Error{}, fmt.Errorf("unrecognized error code: %s", code)
+	}
+}
+
 // isValidID checks if the ID string is valid.
 // The ID string is expected to be in the format of "<ms>-<seq>",
 // where <ms> and <seq> are base-10 unsigned integers without leading sign.
@@ -206,12 +301,12 @@ func IsValidIDMillis(millis string) bool {
 	return idMillisRegex.MatchString(millis)
 }
 
-// encodeArrayHeader encodes an array header to the provided writer.
+// writeArrayHeader writes an array header to the provided writer.
 // The format is: *<length>\r\n
 // This is used by both the command encoder (client-side) and reply encoder (server-side)
 // to write array headers before encoding array elements.
 // Returns any I/O error encountered during writing.
-func encodeArrayHeader(w *bufio.Writer, length int) error {
+func writeArrayHeader(w *bufio.Writer, length int) error {
 	err := w.WriteByte(symbolArray)
 	if err != nil {
 		return err
