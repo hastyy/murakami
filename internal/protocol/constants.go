@@ -24,5 +24,6 @@ const (
 	optionBlock = "BLOCK"
 
 	// Reply strings
-	ReplyOK = "+OK\r\n"
+	ReplyOK       = "+OK\r\n"
+	replyOKString = "OK"
 )

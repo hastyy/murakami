@@ -5,6 +5,9 @@
 REFACTOR:
 
 - Refactor: Delayer + Listener interfaces for tcp.Server (instead of passing it functions); Delayer.Bakcoff(), Delayer.Reset(), Listener.Listen()
+- Refactor: Decode bulk bytes in multiple steps to get the length first, then pass the length to BufferProvider so it can make better decisions about the size of the buffer it provides, e.g. it can allocate exactly those many bytes or match the length to the closest buffer class size to return one of those
+
+- Turn the client main code into a benchmarking harness
 
 - Introduce structured logging (for later tracing and debugging) https://claude.ai/chat/e89d7de0-ffa6-46d3-9a50-2d4b4984534b
 - Add Promtail (log shipper) to ship logs to Loki (log store) to then visualize in Grafana

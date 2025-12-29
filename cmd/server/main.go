@@ -55,7 +55,7 @@ func main() {
 	}
 
 	// Make a best effort to shut down the server cleanly.
-	// We don’t need to collect the server’s error if we didn’t already;
+	// We don't need to collect the server's error if we didn't already;
 	// Shutdown will let us know (unless something worse happens, in which case it will tell us that).
 	sdctx, sdcancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer sdcancel()

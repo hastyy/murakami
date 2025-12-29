@@ -5,7 +5,7 @@ import "github.com/hastyy/murakami/internal/unit"
 const (
 	// TODO: Make all these configurable
 	// DEFAULT_POOL_SIZE is the maximum number of buffers that can be pooled.
-	DEFAULT_POOL_SIZE = 1024
+	DEFAULT_POOL_SIZE = 1024 * 1024
 	// DEFAULT_BUFFER_SIZE is the size of each buffer in the pool (4 KiB).
 	DEFAULT_BUFFER_SIZE = 4 * unit.KiB
 )

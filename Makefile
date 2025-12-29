@@ -1,15 +1,26 @@
-.PHONY: build run fmt lint vet test test-race clean
+.PHONY: build build-server build-client run run-client fmt lint vet test test-race clean
 
-BINARY_NAME=murakami-server
+SERVER_BINARY=murakami-server
+CLIENT_BINARY=murakami-client
 BIN_DIR=bin
 
-build:
-	@echo "Building..."
-	@go build -o $(BIN_DIR)/$(BINARY_NAME) cmd/main.go
+build: build-server build-client
 
-run: build
-	@echo "Running..."
-	@./$(BIN_DIR)/$(BINARY_NAME)
+build-server:
+	@echo "Building server..."
+	@go build -o $(BIN_DIR)/$(SERVER_BINARY) cmd/server/main.go
+
+build-client:
+	@echo "Building client..."
+	@go build -o $(BIN_DIR)/$(CLIENT_BINARY) cmd/client/main.go
+
+run: build-server
+	@echo "Running server..."
+	@./$(BIN_DIR)/$(SERVER_BINARY)
+
+run-client: build-client
+	@echo "Running client..."
+	@./$(BIN_DIR)/$(CLIENT_BINARY)
 
 fmt:
 	@echo "Formatting..."
