@@ -24,8 +24,8 @@ func (d *ReplyDecoder) DecodeCreateReply(r *bufio.Reader) (CreateReply, error) {
 		if err != nil {
 			return CreateReply{}, err
 		}
-		if str != ReplyOK {
-			return CreateReply{}, fmt.Errorf("expected %s, got %s", ReplyOK, str)
+		if str != replyOKString {
+			return CreateReply{}, fmt.Errorf("expected %s, got %s", replyOKString, str)
 		}
 		return CreateReply{Ok: true}, nil
 	case symbolError:
@@ -128,8 +128,8 @@ func (d *ReplyDecoder) DecodeTrimReply(r *bufio.Reader) (TrimReply, error) {
 		if err != nil {
 			return TrimReply{}, err
 		}
-		if str != ReplyOK {
-			return TrimReply{}, fmt.Errorf("expected %s, got %s", ReplyOK, str)
+		if str != replyOKString {
+			return TrimReply{}, fmt.Errorf("expected %s, got %s", replyOKString, str)
 		}
 		return TrimReply{Ok: true}, nil
 	case symbolError:
@@ -156,8 +156,8 @@ func (d *ReplyDecoder) DecodeDeleteReply(r *bufio.Reader) (DeleteReply, error) {
 		if err != nil {
 			return DeleteReply{}, err
 		}
-		if str != ReplyOK {
-			return DeleteReply{}, fmt.Errorf("expected %s, got %s", ReplyOK, str)
+		if str != replyOKString {
+			return DeleteReply{}, fmt.Errorf("expected %s, got %s", replyOKString, str)
 		}
 		return DeleteReply{Ok: true}, nil
 	case symbolError:
