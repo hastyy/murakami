@@ -256,18 +256,18 @@ func (s *Server) acceptLoop(h Handler) error {
 			// Reset the backoff delay
 			acceptDelay = 0
 
-		// Check if server is stopped before handling the connection
-		// and increment WaitGroup while holding the lock to avoid races with Stop()
-		// which might be already in s.connWg.Wait()
-		s.mu.Lock()
-		if s.state == stopped {
-			s.mu.Unlock()
-			// Close error is ignored because we're in shutdown path and there's no handler to report to.
-			// The connection was just accepted, so close failures are rare (typically only syscall.EBADF).
-			// TODO: Log this error when we add a logger to the Server.
-			_ = conn.Close()
-			return nil
-		}
+			// Check if server is stopped before handling the connection
+			// and increment WaitGroup while holding the lock to avoid races with Stop()
+			// which might be already in s.connWg.Wait()
+			s.mu.Lock()
+			if s.state == stopped {
+				s.mu.Unlock()
+				// Close error is ignored because we're in shutdown path and there's no handler to report to.
+				// The connection was just accepted, so close failures are rare (typically only syscall.EBADF).
+				// TODO: Log this error when we add a logger to the Server.
+				_ = conn.Close()
+				return nil
+			}
 			s.connWg.Add(1)
 			s.mu.Unlock()
 
