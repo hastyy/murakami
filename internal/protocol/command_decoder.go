@@ -23,10 +23,11 @@ const (
 // BufferProvider represents a buffer pool that manages pre-allocated []byte buffers.
 // It enables efficient buffer reuse and reduces allocation pressure during command decoding.
 type BufferProvider interface {
-	// Get returns a buffer from the internal pool.
+	// Get returns a buffer from the internal pool with at least the requested size.
+	// The implementation may return a buffer larger than requested (e.g., from size classes).
 	// If the pool is empty, the underlying implementation may choose to block waiting
 	// for a buffer to become available, or allocate new buffers on demand.
-	Get() (buf []byte)
+	Get(bufferSize int) (buf []byte)
 
 	// Put returns a buffer to the pool for reuse.
 	// If the pool is full, the underlying implementation may discard the buffer.
@@ -377,9 +378,24 @@ func (d *CommandDecoder) readRecords(r *bufio.Reader) ([][]byte, error) {
 	}()
 
 	for range recordCount {
-		buf := d.bufProvider.Get()
+		length, err := readBulkBytesLengthWithLimit(r, limit)
+		if err != nil {
+			errFound = true
+			return nil, err
+		}
 
-		n, err := readBulkBytes(r, buf, limit)
+		buf := d.bufProvider.Get(length)
+
+		n, err := readNBulkBytes(r, buf, length)
+		if err != nil {
+			errFound = true
+			// Returns the buffer used in processing the current failed record, which never got added to the records slice
+			// and therefore wouldn't get returned by the defer.
+			d.bufProvider.Put(buf)
+			return nil, err
+		}
+
+		err = consumeCRLF(r)
 		if err != nil {
 			errFound = true
 			// Returns the buffer used in processing the current failed record, which never got added to the records slice

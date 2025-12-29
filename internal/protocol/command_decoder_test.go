@@ -297,8 +297,8 @@ func TestDecodeAppendCommand(t *testing.T) {
 			reader:                       reader(fmt.Sprintf("$6\r\nstream\r\n*0\r\n*1\r\n$1048577\r\n%s\r\n", strings.Repeat("x", 1048577))),
 			expectedCommand:              AppendCommand{},
 			expectedErrCode:              ErrCodeLimits,
-			expectedBufPoolGetCallsCount: 1,
-			expectedBufPoolPutCallsCount: 1,
+			expectedBufPoolGetCallsCount: 0, // Length check fails before buffer allocation
+			expectedBufPoolPutCallsCount: 0,
 		},
 		{
 			name:                         "should fail when appending with a batch of records over the configured limit",
@@ -313,8 +313,8 @@ func TestDecodeAppendCommand(t *testing.T) {
 			reader:                       reader(fmt.Sprintf("$6\r\nstream\r\n*0\r\n*2\r\n$524288\r\n%s\r\n$524289\r\n%s\r\n", strings.Repeat("a", 524288), strings.Repeat("b", 524289))),
 			expectedCommand:              AppendCommand{},
 			expectedErrCode:              ErrCodeLimits,
-			expectedBufPoolGetCallsCount: 2,
-			expectedBufPoolPutCallsCount: 2,
+			expectedBufPoolGetCallsCount: 1, // First record succeeds, second fails at length check
+			expectedBufPoolPutCallsCount: 1,
 		},
 		{
 			name:                         "should fail when there are no records",
@@ -345,16 +345,16 @@ func TestDecodeAppendCommand(t *testing.T) {
 			reader:                       reader("$6\r\nstream\r\n*0\r\n*2\r\n$5\r\nhello\r\n$0\r\n\r\n"),
 			expectedCommand:              AppendCommand{},
 			expectedErrCode:              ErrCodeLimits,
-			expectedBufPoolGetCallsCount: 2,
-			expectedBufPoolPutCallsCount: 2,
+			expectedBufPoolGetCallsCount: 1, // First record succeeds, second fails at length check (zero length)
+			expectedBufPoolPutCallsCount: 1,
 		},
 		{
 			name:                         "should fail if one of the records is not a bulk string",
 			reader:                       reader("$6\r\nstream\r\n*0\r\n*2\r\n$5\r\nhello\r\n+world\r\n"),
 			expectedCommand:              AppendCommand{},
 			expectedErrCode:              ErrCodeBadFormat,
-			expectedBufPoolGetCallsCount: 2,
-			expectedBufPoolPutCallsCount: 2,
+			expectedBufPoolGetCallsCount: 1, // First record succeeds, second fails at bulk string symbol check
+			expectedBufPoolPutCallsCount: 1,
 		},
 	}
 
@@ -807,9 +807,9 @@ type mockBufferPool struct {
 	putCallsCount int
 }
 
-func (m *mockBufferPool) Get() []byte {
+func (m *mockBufferPool) Get(bufferSize int) []byte {
 	m.getCallsCount++
-	// Return a 2MB buffer to accommodate large test records
+	// Always return a 2MiB buffer to accommodate large test records
 	return make([]byte, 2*1024*1024)
 }
 

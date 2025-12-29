@@ -15,6 +15,11 @@ const (
 // for lock-free buffer management. Get() blocks when empty (back-pressure), and Put() discards
 // buffers when full to prevent blocking. This implementation prioritizes memory safety
 // over service availability.
+//
+// Note: The current implementation uses a single buffer size class (DEFAULT_BUFFER_SIZE).
+// The bufferSize parameter in Get() is accepted for interface compatibility but the pool
+// always returns buffers of DEFAULT_BUFFER_SIZE. Future implementations may support
+// multiple size classes for more efficient memory usage.
 type BufferPool struct {
 	pool chan []byte
 }
@@ -32,13 +37,23 @@ func NewBufferPool() *BufferPool {
 	}
 }
 
-// Get retrieves a buffer from the pool. Blocks if the pool is empty, providing back-pressure
-// to callers. This blocking behavior prevents unbounded memory growth by limiting the number
+// Get retrieves a buffer from the pool with at least the requested size.
+// Blocks if the pool is empty, providing back-pressure to callers.
+// This blocking behavior prevents unbounded memory growth by limiting the number
 // of concurrent buffer allocations.
-func (p *BufferPool) Get() []byte {
+//
+// Note: The current implementation ignores bufferSize and always returns buffers
+// of DEFAULT_BUFFER_SIZE. Callers should ensure their requested size does not
+// exceed DEFAULT_BUFFER_SIZE, or handle the case where the returned buffer
+// may be smaller than requested.
+func (p *BufferPool) Get(bufferSize int) []byte {
 	// Could add a select/default to allocate a new buffer if the pool is empty
 	// But won't do it for now since the preference for now is memory safety
 	// over service availability
+	//
+	// TODO: Consider implementing size classes or dynamic allocation when
+	// bufferSize > DEFAULT_BUFFER_SIZE
+	_ = bufferSize // Currently unused; pool returns fixed-size buffers
 	return <-p.pool
 }
 

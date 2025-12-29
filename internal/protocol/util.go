@@ -107,6 +107,49 @@ func readBulkStringLength(r *bufio.Reader) (int, error) {
 	return length, nil
 }
 
+// readBulkBytesLengthWithLimit reads a bulk string length from the protocol stream with validation.
+// Expects the bulk string prefix byte ('$') followed by a valid length (integer > 0).
+// The limit parameter specifies the maximum allowed length.
+// Returns an error if length < 1, length > limit, or if the format is invalid.
+func readBulkBytesLengthWithLimit(r *bufio.Reader, limit int) (int, error) {
+	assert.OK(limit > 0, "limit must be greater than 0")
+
+	if err := expectNextByte(r, symbolBulkString); err != nil {
+		return 0, err
+	}
+
+	length, err := readLength(r)
+	if err != nil {
+		return 0, err
+	}
+
+	if length < 1 {
+		return 0, LimitsErrorf("bulk string length must be greater than 0, got %d", length)
+	}
+
+	if length > limit {
+		return 0, LimitsErrorf("bulk string length must be less than or equal to %d, got %d", limit, length)
+	}
+
+	return length, nil
+}
+
+// readNBulkBytes reads exactly n bytes from the reader into the provided buffer.
+// The buffer must be large enough to hold n bytes.
+// Returns the number of bytes read and any error encountered.
+func readNBulkBytes(r *bufio.Reader, buf []byte, n int) (int, error) {
+	assert.OK(n > 0, "n must be greater than 0")
+
+	nread, err := io.ReadFull(r, buf[:n])
+	if err != nil {
+		return 0, err
+	}
+
+	assert.OK(nread == n, "io.ReadFull() did not read the expected number of bytes, got %d expected %d", nread, n)
+
+	return nread, nil
+}
+
 // readBytes reads exactly n bytes from the reader.
 // Returns an error if fewer than n bytes are available or if an I/O error occurs.
 func readBytes(r *bufio.Reader, n int) ([]byte, error) {
