@@ -27,7 +27,7 @@ var (
 	}
 )
 
-// DefaultSizeClassConfig is the default size class configuration.
+// DefaultSizeClassConfig is the default size class configuration for SizeClassesBufferPool.
 // Total memory budget: ~4 GiB for buffers, plus ~733 MiB for channel overhead.
 // Each larger class has double the buffer count of the previous smaller class.
 // This "inverted" distribution favors larger buffers, which is intentional:
@@ -48,7 +48,35 @@ var DefaultSizeClassConfig = map[SizeClass]BufferCount{
 	4 * unit.KiB:    787_200,
 }
 
-// BufferPool is a multi-class buffer pool for efficient reuse of byte slices.
+// BufferPool is a simple single-class buffer pool that wraps SizeClassesBufferPool.
+// It uses a fixed 4 KiB buffer size, which is suitable for most workloads.
+// Total memory budget: ~4 GiB (1,048,576 buffers × 4 KiB).
+type BufferPool struct {
+	pool *SizeClassesBufferPool
+}
+
+// NewBufferPool creates a new BufferPool with a single 4 KiB size class.
+// Pre-allocates 1,048,576 buffers for a total of ~4 GiB memory.
+func NewBufferPool() *BufferPool {
+	return &BufferPool{
+		pool: NewSizeClassesBufferPool(map[SizeClass]BufferCount{
+			4 * unit.KiB: 1_048_576,
+		}, false),
+	}
+}
+
+// Get retrieves a buffer from the pool with at least the requested size.
+// Returns ErrNoBufferAvailable if no buffer is available.
+func (p *BufferPool) Get(requestedSize int) ([]byte, error) {
+	return p.pool.Get(requestedSize)
+}
+
+// Put returns a buffer to the pool for reuse.
+func (p *BufferPool) Put(buf []byte) {
+	p.pool.Put(buf)
+}
+
+// SizeClassesBufferPool is a multi-class buffer pool for efficient reuse of byte slices.
 // It maintains separate pools for different buffer size classes, allowing callers
 // to request buffers of specific sizes and receive appropriately-sized buffers.
 //
@@ -56,18 +84,22 @@ var DefaultSizeClassConfig = map[SizeClass]BufferCount{
 // receives starting from the smallest suitable class; if empty, it tries larger
 // classes and splits buffers down. Put() uses a poison pattern to detect double-Put
 // errors and discards buffers when a pool is full.
-type BufferPool struct {
-	sizeClasses []SizeClass               // sorted sizes for lookup
-	pools       map[SizeClass]chan []byte // size -> pool channel
+type SizeClassesBufferPool struct {
+	sizeClasses    []SizeClass               // sorted sizes for lookup
+	pools          map[SizeClass]chan []byte // size -> pool channel
+	allocWhenEmpty bool                      // allocate new buffer when pool is empty
 }
 
-// NewBufferPool creates a new BufferPool with the specified size class configuration.
+// NewSizeClassesBufferPool creates a new SizeClassesBufferPool with the specified size class configuration.
 // The config maps buffer sizes to the number of buffers to pre-allocate for each class.
 // Classes are sorted internally; no particular order is expected in the input.
 //
+// If allocWhenEmpty is true, Get() allocates a new buffer of the closest size class when
+// all pools are empty, instead of returning ErrNoBufferAvailable.
+//
 // Pool channel capacities are automatically sized to accommodate both the initial
 // buffers and any additional buffers that may be created by splitting larger classes.
-func NewBufferPool(sizeClassConfig map[SizeClass]BufferCount) *BufferPool {
+func NewSizeClassesBufferPool(sizeClassConfig map[SizeClass]BufferCount, allocWhenEmpty bool) *SizeClassesBufferPool {
 	// Extract and sort size classes
 	sizeClasses := make([]SizeClass, 0, len(sizeClassConfig))
 	for sizeClass := range sizeClassConfig {
@@ -101,9 +133,10 @@ func NewBufferPool(sizeClassConfig map[SizeClass]BufferCount) *BufferPool {
 		pools[sizeClass] = pool
 	}
 
-	return &BufferPool{
-		sizeClasses: sizeClasses,
-		pools:       pools,
+	return &SizeClassesBufferPool{
+		sizeClasses:    sizeClasses,
+		pools:          pools,
+		allocWhenEmpty: allocWhenEmpty,
 	}
 }
 
@@ -115,13 +148,21 @@ func NewBufferPool(sizeClassConfig map[SizeClass]BufferCount) *BufferPool {
 // it is split based on power-of-2 division: one part is returned, the rest are Put
 // back to the appropriate pool based on their size.
 //
-// Returns ErrNoBufferAvailable if all suitable pools are empty.
-func (p *BufferPool) Get(requestedSize int) ([]byte, error) {
+// Returns ErrNoBufferAvailable if all suitable pools are empty (unless allocWhenEmpty is true).
+func (p *SizeClassesBufferPool) Get(requestedSize int) ([]byte, error) {
+	// Track smallest suitable class for potential allocation
+	var smallestSuitableClass SizeClass = -1
+
 	// Linear search through sorted classes to find smallest class >= requestedSize.
 	// Intentionally simple - we expect a small number of classes (5-10).
 	for classIdx, classSize := range p.sizeClasses {
 		if classSize < requestedSize {
 			continue
+		}
+
+		// Remember the first (smallest) suitable class
+		if smallestSuitableClass == -1 {
+			smallestSuitableClass = classSize
 		}
 
 		select {
@@ -142,6 +183,11 @@ func (p *BufferPool) Get(requestedSize int) ([]byte, error) {
 		}
 	}
 
+	// All pools empty - allocate if configured to do so
+	if p.allocWhenEmpty && smallestSuitableClass > 0 {
+		return make([]byte, smallestSuitableClass), nil
+	}
+
 	return nil, ErrNoBufferAvailable
 }
 
@@ -152,7 +198,7 @@ func (p *BufferPool) Get(requestedSize int) ([]byte, error) {
 // - 512/129 ≈ 3.96, floor to power of 2 = 2
 // - Split into 2 parts of 256 bytes each
 // - Return first 256-byte part, Put second 256-byte part to 256 pool
-func (p *BufferPool) splitAndReturn(buf []byte, requestedSize int) []byte {
+func (p *SizeClassesBufferPool) splitAndReturn(buf []byte, requestedSize int) []byte {
 	bufLen := len(buf)
 
 	// Determine split count as largest power of 2 <= bufLen/requestedSize
@@ -191,7 +237,7 @@ func floorPowerOf2(n int) int {
 // the buffer is discarded.
 //
 // Callers should return buffers with their original length intact.
-func (p *BufferPool) Put(buf []byte) {
+func (p *SizeClassesBufferPool) Put(buf []byte) {
 	size := len(buf)
 	pool, ok := p.pools[size]
 	if !ok {
