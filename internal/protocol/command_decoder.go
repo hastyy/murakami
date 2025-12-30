@@ -25,9 +25,8 @@ const (
 type BufferProvider interface {
 	// Get returns a buffer from the internal pool with at least the requested size.
 	// The implementation may return a buffer larger than requested (e.g., from size classes).
-	// If the pool is empty, the underlying implementation may choose to block waiting
-	// for a buffer to become available, or allocate new buffers on demand.
-	Get(bufferSize int) (buf []byte)
+	// Returns an error if no buffer is available.
+	Get(bufferSize int) (buf []byte, err error)
 
 	// Put returns a buffer to the pool for reuse.
 	// If the pool is full, the underlying implementation may discard the buffer.
@@ -384,7 +383,11 @@ func (d *CommandDecoder) readRecords(r *bufio.Reader) ([][]byte, error) {
 			return nil, err
 		}
 
-		buf := d.bufProvider.Get(length)
+		buf, err := d.bufProvider.Get(length)
+		if err != nil {
+			errFound = true
+			return nil, err
+		}
 
 		n, err := readNBulkBytes(r, buf, length)
 		if err != nil {

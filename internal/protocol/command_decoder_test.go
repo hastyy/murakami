@@ -807,10 +807,10 @@ type mockBufferPool struct {
 	putCallsCount int
 }
 
-func (m *mockBufferPool) Get(bufferSize int) []byte {
+func (m *mockBufferPool) Get(bufferSize int) ([]byte, error) {
 	m.getCallsCount++
 	// Always return a 2MiB buffer to accommodate large test records
-	return make([]byte, 2*1024*1024)
+	return make([]byte, 2*1024*1024), nil
 }
 
 func (m *mockBufferPool) Put(b []byte) {

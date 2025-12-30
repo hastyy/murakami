@@ -1,71 +1,216 @@
 package protocol
 
-import "github.com/hastyy/murakami/internal/unit"
+import (
+	"bytes"
+	"errors"
+	"slices"
 
-const (
-	// TODO: Make all these configurable
-	// DEFAULT_POOL_SIZE is the maximum number of buffers that can be pooled.
-	DEFAULT_POOL_SIZE = 1024 * 1024
-	// DEFAULT_BUFFER_SIZE is the size of each buffer in the pool (4 KiB).
-	DEFAULT_BUFFER_SIZE = 4 * unit.KiB
+	"github.com/hastyy/murakami/internal/assert"
+	"github.com/hastyy/murakami/internal/unit"
 )
 
-// BufferPool is a channel-based buffer pool for efficient reuse of byte slices.
-// It pre-allocates a fixed number of buffers at initialization and uses a buffered channel
-// for lock-free buffer management. Get() blocks when empty (back-pressure), and Put() discards
-// buffers when full to prevent blocking. This implementation prioritizes memory safety
-// over service availability.
+// SizeClass represents a buffer size in bytes.
+type SizeClass = int
+
+// BufferCount represents the number of buffers to pre-allocate.
+type BufferCount = int
+
+var (
+	// ErrNoBufferAvailable is returned when no buffer is available in any pool.
+	ErrNoBufferAvailable = errors.New("no buffer available")
+
+	// poisonPattern is written to the first bytes of a buffer when it's in the pool.
+	// Used to detect double-Put errors.
+	poisonPattern = []byte{
+		0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+		0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+	}
+)
+
+// DefaultSizeClassConfig is the default size class configuration.
+// Total memory budget: ~4 GiB for buffers, plus ~733 MiB for channel overhead.
+// Each larger class has double the buffer count of the previous smaller class.
+// This "inverted" distribution favors larger buffers, which is intentional:
+// larger buffers can be split into smaller ones to replenish depleted smaller classes,
+// but smaller buffers cannot be combined into larger ones.
 //
-// Note: The current implementation uses a single buffer size class (DEFAULT_BUFFER_SIZE).
-// The bufferSize parameter in Get() is accepted for interface compatibility but the pool
-// always returns buffers of DEFAULT_BUFFER_SIZE. Future implementations may support
-// multiple size classes for more efficient memory usage.
-type BufferPool struct {
-	pool chan []byte
+// Derivation: With sizes 256, 512, 1K, 2K, 4K and counts x, 2x, 4x, 8x, 16x,
+// total memory = 256x + 1024x + 4096x + 16384x + 65536x = 87,296x = 4 GiB, so x ≈ 49,200.
+//
+// Pool channel capacities are sized to hold the initial buffers plus all possible
+// buffers that could be created by splitting larger classes. For example, the 256-byte
+// pool can hold its initial 49,200 buffers plus up to 16,728,000 buffers from splits.
+var DefaultSizeClassConfig = map[SizeClass]BufferCount{
+	256 * unit.Byte: 49_200,
+	512 * unit.Byte: 98_400,
+	1 * unit.KiB:    196_800,
+	2 * unit.KiB:    393_600,
+	4 * unit.KiB:    787_200,
 }
 
-// NewBufferPool creates a new BufferPool pre-populated with DEFAULT_POOL_SIZE buffers,
-// each of size DEFAULT_BUFFER_SIZE.
-func NewBufferPool() *BufferPool {
-	pool := make(chan []byte, DEFAULT_POOL_SIZE)
-	for range DEFAULT_POOL_SIZE {
-		pool <- make([]byte, DEFAULT_BUFFER_SIZE)
+// BufferPool is a multi-class buffer pool for efficient reuse of byte slices.
+// It maintains separate pools for different buffer size classes, allowing callers
+// to request buffers of specific sizes and receive appropriately-sized buffers.
+//
+// Each size class has its own channel-based pool. Get() attempts non-blocking
+// receives starting from the smallest suitable class; if empty, it tries larger
+// classes and splits buffers down. Put() uses a poison pattern to detect double-Put
+// errors and discards buffers when a pool is full.
+type BufferPool struct {
+	sizeClasses []SizeClass               // sorted sizes for lookup
+	pools       map[SizeClass]chan []byte // size -> pool channel
+}
+
+// NewBufferPool creates a new BufferPool with the specified size class configuration.
+// The config maps buffer sizes to the number of buffers to pre-allocate for each class.
+// Classes are sorted internally; no particular order is expected in the input.
+//
+// Pool channel capacities are automatically sized to accommodate both the initial
+// buffers and any additional buffers that may be created by splitting larger classes.
+func NewBufferPool(sizeClassConfig map[SizeClass]BufferCount) *BufferPool {
+	// Extract and sort size classes
+	sizeClasses := make([]SizeClass, 0, len(sizeClassConfig))
+	for sizeClass := range sizeClassConfig {
+		sizeClasses = append(sizeClasses, sizeClass)
+	}
+	slices.Sort(sizeClasses)
+
+	// Create and populate pools
+	pools := make(map[SizeClass]chan []byte, len(sizeClasses))
+	for i, sizeClass := range sizeClasses {
+		bufferCount := sizeClassConfig[sizeClass]
+
+		// Calculate channel capacity: initial count + potential splits from larger classes
+		channelCapacity := bufferCount
+		for j := i + 1; j < len(sizeClasses); j++ {
+			largerClass := sizeClasses[j]
+			largerCount := sizeClassConfig[largerClass]
+			splitFactor := largerClass / sizeClass
+			channelCapacity += splitFactor * largerCount
+		}
+
+		pool := make(chan []byte, channelCapacity)
+		for range bufferCount {
+			buf := make([]byte, sizeClass)
+			// Mark as poisoned (in pool)
+			if len(buf) >= len(poisonPattern) {
+				copy(buf[:len(poisonPattern)], poisonPattern)
+			}
+			pool <- buf
+		}
+		pools[sizeClass] = pool
 	}
 
 	return &BufferPool{
-		pool: pool,
+		sizeClasses: sizeClasses,
+		pools:       pools,
 	}
 }
 
 // Get retrieves a buffer from the pool with at least the requested size.
-// Blocks if the pool is empty, providing back-pressure to callers.
-// This blocking behavior prevents unbounded memory growth by limiting the number
-// of concurrent buffer allocations.
+// It finds the smallest size class that can accommodate requestedSize and attempts
+// a non-blocking receive. If that class is empty, it tries larger classes.
 //
-// Note: The current implementation ignores bufferSize and always returns buffers
-// of DEFAULT_BUFFER_SIZE. Callers should ensure their requested size does not
-// exceed DEFAULT_BUFFER_SIZE, or handle the case where the returned buffer
-// may be smaller than requested.
-func (p *BufferPool) Get(bufferSize int) []byte {
-	// Could add a select/default to allocate a new buffer if the pool is empty
-	// But won't do it for now since the preference for now is memory safety
-	// over service availability
-	//
-	// TODO: Consider implementing size classes or dynamic allocation when
-	// bufferSize > DEFAULT_BUFFER_SIZE
-	_ = bufferSize // Currently unused; pool returns fixed-size buffers
-	return <-p.pool
+// When a buffer from a larger class is obtained and is at least 2x the requested size,
+// it is split based on power-of-2 division: one part is returned, the rest are Put
+// back to the appropriate pool based on their size.
+//
+// Returns ErrNoBufferAvailable if all suitable pools are empty.
+func (p *BufferPool) Get(requestedSize int) ([]byte, error) {
+	// Linear search through sorted classes to find smallest class >= requestedSize.
+	// Intentionally simple - we expect a small number of classes (5-10).
+	for classIdx, classSize := range p.sizeClasses {
+		if classSize < requestedSize {
+			continue
+		}
+
+		select {
+		case buf := <-p.pools[classSize]:
+			// Clear poison pattern
+			if len(buf) >= len(poisonPattern) {
+				clear(buf[:len(poisonPattern)])
+			}
+
+			// If not at first class and buffer is at least 2x requested, split
+			if classIdx > 0 && len(buf) >= 2*requestedSize {
+				return p.splitAndReturn(buf, requestedSize), nil
+			}
+			return buf, nil
+		default:
+			// Pool empty, try next larger class
+			continue
+		}
+	}
+
+	return nil, ErrNoBufferAvailable
 }
 
-// Put returns a buffer to the pool for reuse. If the pool is full, the buffer is discarded
-// (non-blocking). This prevents callers from blocking on Put() operations, ensuring Put() never
-// stalls request processing.
-func (p *BufferPool) Put(b []byte) {
-	// Could add some sort of pointer set to detect if we're trying to put the same buffer twice
-	// But won't do it for now to avoid complexity
+// splitAndReturn splits a buffer based on power-of-2 division of buffer length
+// by requested size. Returns the first split and Puts the rest back to the pool.
+//
+// Example: requestedSize=129, buf length=512
+// - 512/129 ≈ 3.96, floor to power of 2 = 2
+// - Split into 2 parts of 256 bytes each
+// - Return first 256-byte part, Put second 256-byte part to 256 pool
+func (p *BufferPool) splitAndReturn(buf []byte, requestedSize int) []byte {
+	bufLen := len(buf)
+
+	// Determine split count as largest power of 2 <= bufLen/requestedSize
+	splitCount := floorPowerOf2(bufLen / requestedSize)
+	splitSize := bufLen / splitCount
+
+	// Return first split
+	result := buf[:splitSize]
+
+	// Put remaining splits (they'll go to matching pool or be discarded)
+	for i := 1; i < splitCount; i++ {
+		start := i * splitSize
+		split := buf[start : start+splitSize]
+		p.Put(split)
+	}
+
+	return result
+}
+
+// floorPowerOf2 returns the largest power of 2 less than or equal to n.
+// Returns 0 if n <= 0.
+func floorPowerOf2(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	power := 1
+	for power*2 <= n {
+		power *= 2
+	}
+	return power
+}
+
+// Put returns a buffer to the appropriate pool based on its length.
+// Uses a poison pattern to detect double-Put errors.
+// If the pool is full or the buffer's length doesn't match any size class,
+// the buffer is discarded.
+//
+// Callers should return buffers with their original length intact.
+func (p *BufferPool) Put(buf []byte) {
+	size := len(buf)
+	pool, ok := p.pools[size]
+	if !ok {
+		// Unknown size class - discard
+		return
+	}
+
+	// Check for double-Put using poison pattern
+	assert.OK(len(buf) >= len(poisonPattern), "buffer too small for poison pattern check")
+	assert.OK(!bytes.Equal(buf[:len(poisonPattern)], poisonPattern), "bufferpool: double Put detected - buffer already in pool")
+
+	// Write poison pattern
+	copy(buf[:len(poisonPattern)], poisonPattern)
+
 	select {
-	case p.pool <- b:
+	case pool <- buf:
 	default:
-		// If the pool is full, discard the buffer
+		// TODO: Add warning log here - pool is full, discarding buffer.
+		// This should be rare now that channel capacity accounts for splits,
+		// but could indicate a buffer leak (Get without Put).
 	}
 }

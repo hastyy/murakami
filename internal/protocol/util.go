@@ -140,6 +140,7 @@ func readBulkBytesLengthWithLimit(r *bufio.Reader, limit int) (int, error) {
 func readNBulkBytes(r *bufio.Reader, buf []byte, n int) (int, error) {
 	assert.OK(n > 0, "n must be greater than 0")
 
+	// TODO: look into bug here where if the underlying buffered readeer buffer doesn't contain all the requested bytes at once, instead of pulling more from the underlying reader, it will return an error.
 	nread, err := io.ReadFull(r, buf[:n])
 	if err != nil {
 		return 0, err

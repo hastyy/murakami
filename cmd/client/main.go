@@ -15,13 +15,14 @@ import (
 
 	"github.com/hastyy/murakami/internal/protocol"
 	"github.com/hastyy/murakami/internal/tcp"
+	"github.com/hastyy/murakami/internal/unit"
 )
 
 func main() {
 	// Define command-line flags
 	concurrency := flag.Int("concurrency", 4, "number of concurrent clients to spawn (must be > 0)")
 	requestCount := flag.Int("requests", 10_000, "number of requests each client should send (must be > 0)")
-	requestSize := flag.Int("size", 256, "size of the payload to send in bytes (must be > 0)")
+	requestSize := flag.Int("size", 1 * unit.KiB, "size of the payload to send in bytes (must be > 0)")
 
 	// Parse flags
 	flag.Parse()
@@ -79,11 +80,19 @@ func main() {
 				StreamName: streamName,
 			})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[Client %d] Failed to create stream %s: %v\n", i, streamName, err)
-				// TODO: Handle error
-				return
+				if perr, ok := protocol.IsProtocolError(err); ok {
+					if perr.Code != protocol.ErrCodeStreamExists {
+						fmt.Fprintf(os.Stderr, "[Client %d] Failed to create stream %s: %v\n", i, streamName, err)
+						// TODO: Handle error
+						return
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "[Client %d] Failed to create stream %s: %v\n", i, streamName, err)
+					// TODO: Handle error
+					return
+				}
 			}
-			if !reply.Ok {
+			if !reply.Ok && reply.Err.Code != protocol.ErrCodeStreamExists {
 				fmt.Fprintf(os.Stderr, "[Client %d] Create stream %s returned error: %v\n", i, streamName, reply.Err)
 				// TODO: Handle error
 				return
