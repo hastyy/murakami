@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"errors"
 	"strconv"
 )
 
@@ -122,13 +123,17 @@ func (e *CommandEncoder) EncodeReadCommand(w *bufio.Writer, cmd ReadCommand) err
 	return nil
 }
 
-// TODO: add check to error if cmd doesn't contain MIN_ID
 // EncodeTrimCommand encodes a TRIM command to the provided writer.
 // The command is encoded as an array with 3 elements: command name, stream name, and options.
 // The format is: *3\r\n$4\r\nTRIM\r\n$<stream_len>\r\n<stream_name>\r\n*<opts>\r\n...\r\n
-// Options must include the MIN_ID option (mandatory for TRIM).
-// Returns any I/O error encountered during writing.
+// Options must include the MIN_ID option (mandatory for TRIM) with a valid ID format.
+// Returns an error if MIN_ID is missing or invalid, or any I/O error encountered during writing.
 func (e *CommandEncoder) EncodeTrimCommand(w *bufio.Writer, cmd TrimCommand) error {
+	// Validate MIN_ID is present and valid
+	if !IsValidID(cmd.Options.MinID) {
+		return errors.New("TRIM command requires a valid MIN_ID option")
+	}
+
 	// Write array header: *3\r\n
 	err := writeArrayHeader(w, 3)
 	if err != nil {

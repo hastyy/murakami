@@ -407,6 +407,72 @@ func TestEncodeTrimCommand(t *testing.T) {
 	}
 }
 
+func TestEncodeTrimCommand_InvalidMinID(t *testing.T) {
+	encoder := NewCommandEncoder()
+
+	tests := []struct {
+		name  string
+		minID string
+	}{
+		{
+			name:  "empty MIN_ID",
+			minID: "",
+		},
+		{
+			name:  "MIN_ID missing dash",
+			minID: "1234567890",
+		},
+		{
+			name:  "MIN_ID missing sequence after dash",
+			minID: "1234567890-",
+		},
+		{
+			name:  "MIN_ID missing timestamp before dash",
+			minID: "-0",
+		},
+		{
+			name:  "MIN_ID with letters in timestamp",
+			minID: "123abc-0",
+		},
+		{
+			name:  "MIN_ID with letters in sequence",
+			minID: "1234567890-abc",
+		},
+		{
+			name:  "MIN_ID with negative timestamp",
+			minID: "-1234567890-0",
+		},
+		{
+			name:  "MIN_ID with spaces",
+			minID: "1234567890 -0",
+		},
+		{
+			name:  "MIN_ID with multiple dashes",
+			minID: "1234-5678-90",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require := require.New(t)
+
+			var buf bytes.Buffer
+			writer := bufio.NewWriter(&buf)
+
+			cmd := TrimCommand{
+				StreamName: "mystream",
+				Options: TrimCommandOptions{
+					MinID: test.minID,
+				},
+			}
+
+			err := encoder.EncodeTrimCommand(writer, cmd)
+			require.Error(err)
+			require.Contains(err.Error(), "TRIM command requires a valid MIN_ID option")
+		})
+	}
+}
+
 func TestEncodeTrimCommand_WriterError(t *testing.T) {
 	require := require.New(t)
 	encoder := NewCommandEncoder()
