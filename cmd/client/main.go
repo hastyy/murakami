@@ -22,7 +22,7 @@ func main() {
 	// Define command-line flags
 	concurrency := flag.Int("concurrency", 4, "number of concurrent clients to spawn (must be > 0)")
 	requestCount := flag.Int("requests", 10_000, "number of requests each client should send (must be > 0)")
-	requestSize := flag.Int("size", 1*unit.KiB, "size of the payload to send in bytes (must be > 0)")
+	requestSize := flag.Int("size", 4*unit.KiB, "size of the payload to send in bytes (must be > 0)")
 
 	// Parse flags
 	flag.Parse()

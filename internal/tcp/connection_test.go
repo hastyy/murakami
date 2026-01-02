@@ -83,8 +83,8 @@ func TestResetLimits(t *testing.T) {
 	// Call ResetLimits
 	c.ResetLimits()
 
-	// Verify the limit was reset to buffer size
-	require.Equal(int64(1024), c.lreader.N)
+	// Verify the limit was reset to double the buffer size
+	require.Equal(int64(2*1024), c.lreader.N)
 }
 
 func TestBufferedReader(t *testing.T) {
