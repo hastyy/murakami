@@ -73,14 +73,61 @@ type ConnectionProvider interface {
 	Put(*Connection)
 }
 
-// ListenFunc is a function that creates and returns a net.Listener bound to the specified address.
-// It abstracts the network listening logic, allowing for custom listener implementations or testing.
-type ListenFunc func(address string) (net.Listener, error)
+// Listener abstracts the network listening logic, allowing for custom listener implementations or testing.
+type Listener interface {
+	// Listen creates and returns a net.Listener bound to the specified address.
+	Listen(address string) (net.Listener, error)
+}
 
-// BackoffFunc is a function that implements a backoff delay strategy.
-// It's called with the desired delay duration when the server needs to back off
-// (e.g., after temporary connection acceptance errors) before retrying.
-type BackoffFunc func(delay time.Duration)
+// AcceptDelayer implements a backoff delay strategy for handling temporary accept errors.
+// It encapsulates the delay state and provides methods to apply and reset the backoff.
+type AcceptDelayer interface {
+	// Backoff increments the internal delay (with exponential backoff) and sleeps for that duration.
+	// The delay starts at an initial value and doubles on each call, up to a maximum.
+	Backoff()
+
+	// Reset resets the internal delay to zero, typically called after a successful accept.
+	Reset()
+}
+
+// ExponentialAcceptDelayer is an AcceptDelayer that uses exponential backoff.
+// It starts with an initial delay and doubles the delay on each call to Backoff(),
+// up to a maximum delay. The delay is reset to zero when Reset() is called.
+type ExponentialAcceptDelayer struct {
+	delay   time.Duration
+	initial time.Duration
+	max     time.Duration
+	sleepFn func(time.Duration)
+}
+
+// NewExponentialAcceptDelayer creates a new ExponentialAcceptDelayer with the specified
+// initial and maximum delay durations, and a sleep function to apply the delay.
+func NewExponentialAcceptDelayer(initial, max time.Duration, sleepFn func(time.Duration)) *ExponentialAcceptDelayer {
+	return &ExponentialAcceptDelayer{
+		delay:   0,
+		initial: initial,
+		max:     max,
+		sleepFn: sleepFn,
+	}
+}
+
+// Backoff increments the delay and sleeps for that duration.
+func (d *ExponentialAcceptDelayer) Backoff() {
+	if d.delay == 0 {
+		d.delay = d.initial
+	} else {
+		d.delay *= 2
+	}
+	if d.delay > d.max {
+		d.delay = d.max
+	}
+	d.sleepFn(d.delay)
+}
+
+// Reset resets the delay to zero.
+func (d *ExponentialAcceptDelayer) Reset() {
+	d.delay = 0
+}
 
 // Server is a TCP server that manages connection lifecycle and delegates application logic to a Handler.
 // It uses a ConnectionProvider to efficiently pool and reuse Connection objects across multiple sessions.
@@ -88,13 +135,13 @@ type BackoffFunc func(delay time.Duration)
 // with synchronization primitives to ensure all active connections are properly cleaned up.
 type Server struct {
 	// Server state
-	state    serverState
-	listener net.Listener
+	state       serverState
+	netListener net.Listener
 
 	// Server dependencies
-	connProvider ConnectionProvider
-	listen       ListenFunc
-	backoff      BackoffFunc
+	connProvider  ConnectionProvider
+	listener      Listener
+	acceptDelayer AcceptDelayer
 
 	// Server config
 	cfg ServerConfig
@@ -113,18 +160,18 @@ type ServerConfig struct {
 
 // NewServer creates a new TCP Server with the specified dependencies and configuration.
 // The Server is created in an idle state and must be started via Start() before accepting connections.
-func NewServer(connProvider ConnectionProvider, listen ListenFunc, backoff BackoffFunc, cfg ServerConfig) *Server {
+func NewServer(connProvider ConnectionProvider, listener Listener, acceptDelayer AcceptDelayer, cfg ServerConfig) *Server {
 	assert.NonNil(connProvider, "ConnectionProvider is required")
-	assert.NonNil(listen, "ListenFunc is required")
-	assert.NonNil(backoff, "BackoffFunc is required")
+	assert.NonNil(listener, "Listener is required")
+	assert.NonNil(acceptDelayer, "AcceptDelayer is required")
 
 	return &Server{
-		state:        idle,
-		connProvider: connProvider,
-		listen:       listen,
-		backoff:      backoff,
-		cfg:          cfg,
-		stopCh:       make(chan struct{}),
+		state:         idle,
+		connProvider:  connProvider,
+		listener:      listener,
+		acceptDelayer: acceptDelayer,
+		cfg:           cfg,
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -152,14 +199,14 @@ func (s *Server) Start(h Handler) error {
 	}
 
 	// Start listening for TCP connections
-	listener, err := s.listen(s.cfg.Address)
+	netListener, err := s.listener.Listen(s.cfg.Address)
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("unable to listen on %s: %w", s.cfg.Address, err)
 	}
 
 	// Set state and release the lock
-	s.listener = listener
+	s.netListener = netListener
 	s.state = running
 	s.mu.Unlock()
 
@@ -195,7 +242,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 
 	// Close the listener
-	if err := s.listener.Close(); err != nil {
+	if err := s.netListener.Close(); err != nil {
 		return err
 	}
 
@@ -222,9 +269,6 @@ func (s *Server) acceptLoop(h Handler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Acts as a backoff mechanism to avoid busy-waiting
-	var acceptDelay time.Duration
-
 	for {
 		select {
 		case <-s.stopCh:
@@ -232,21 +276,11 @@ func (s *Server) acceptLoop(h Handler) error {
 			return nil
 		default:
 			// Accept a new connection
-			conn, err := s.listener.Accept()
+			conn, err := s.netListener.Accept()
 			if err != nil {
 				// If the error is a timeout, back off
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					if acceptDelay == 0 {
-						acceptDelay = 5 * time.Millisecond
-					} else {
-						acceptDelay *= 2
-					}
-					if acceptDelay > DEFAULT_MAX_ACCEPT_DELAY {
-						acceptDelay = DEFAULT_MAX_ACCEPT_DELAY
-					}
-
-					// Back off for the duration of the accept delay
-					s.backoff(acceptDelay)
+					s.acceptDelayer.Backoff()
 					continue
 				}
 				// If the error is not a timeout, return it
@@ -254,7 +288,7 @@ func (s *Server) acceptLoop(h Handler) error {
 			}
 
 			// Reset the backoff delay
-			acceptDelay = 0
+			s.acceptDelayer.Reset()
 
 			// Check if server is stopped before handling the connection
 			// and increment WaitGroup while holding the lock to avoid races with Stop()

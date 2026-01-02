@@ -16,6 +16,14 @@ import (
 	"github.com/hastyy/murakami/internal/tcp"
 )
 
+// netListener implements the tcp.Listener interface using the standard library's net.Listen.
+type netListener struct{}
+
+// Listen creates and returns a net.Listener bound to the specified address.
+func (l *netListener) Listen(address string) (net.Listener, error) {
+	return net.Listen("tcp", address)
+}
+
 func main() {
 	// Create the base logger
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -32,10 +40,9 @@ func main() {
 	handler := controller.New(store, decoder, encoder, logger.With("component", "controller"))
 
 	connPool := tcp.NewConnectionPool()
-	listen := func(address string) (net.Listener, error) {
-		return net.Listen("tcp", address)
-	}
-	srv := tcp.NewServer(connPool, listen, time.Sleep, tcp.ServerConfig{
+	listener := &netListener{}
+	acceptDelayer := tcp.NewExponentialAcceptDelayer(5*time.Millisecond, tcp.DEFAULT_MAX_ACCEPT_DELAY, time.Sleep)
+	srv := tcp.NewServer(connPool, listener, acceptDelayer, tcp.ServerConfig{
 		Address: ":7500",
 	})
 

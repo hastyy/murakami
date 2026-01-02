@@ -49,6 +49,38 @@ func (m *mockListener) Addr() net.Addr {
 	return nil
 }
 
+// mockNetListener implements the Listener interface for testing.
+type mockNetListener struct {
+	listenFunc func(address string) (net.Listener, error)
+}
+
+func (m *mockNetListener) Listen(address string) (net.Listener, error) {
+	if m.listenFunc != nil {
+		return m.listenFunc(address)
+	}
+	// Can return nil, nil here since listen is not expected to be called in the test
+	// that hasn't specified a listenFunc.
+	return nil, nil
+}
+
+// mockAcceptDelayer implements the AcceptDelayer interface for testing.
+type mockAcceptDelayer struct {
+	backoffFunc func()
+	resetFunc   func()
+}
+
+func (m *mockAcceptDelayer) Backoff() {
+	if m.backoffFunc != nil {
+		m.backoffFunc()
+	}
+}
+
+func (m *mockAcceptDelayer) Reset() {
+	if m.resetFunc != nil {
+		m.resetFunc()
+	}
+}
+
 type mockTimeoutError struct{}
 
 func (e *mockTimeoutError) Error() string   { return "mock timeout" }
@@ -100,18 +132,13 @@ func TestNew_CreatesProperServer(t *testing.T) {
 	require := require.New(t)
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		// Can return nil, nil here since listen is never called in the test
-		return nil, nil
-	}
-	backoff := func(delay time.Duration) {
-		time.Sleep(delay)
-	}
+	listener := &mockNetListener{}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	// Verify server is not nil
 	require.NotNil(s)
@@ -121,8 +148,8 @@ func TestNew_CreatesProperServer(t *testing.T) {
 
 	// Verify dependencies are set correctly
 	require.NotNil(s.connProvider)
-	require.NotNil(s.listen)
-	require.NotNil(s.backoff)
+	require.NotNil(s.listener)
+	require.NotNil(s.acceptDelayer)
 	require.Equal(":8080", s.cfg.Address)
 	require.NotNil(s.stopCh)
 }
@@ -131,16 +158,13 @@ func TestStart_ReturnsErrorOnAlreadyStopped(t *testing.T) {
 	require := require.New(t)
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		// Can return nil, nil here since listen is never called in the test
-		return nil, nil
-	}
-	backoff := func(delay time.Duration) {}
+	listener := &mockNetListener{}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	// Stop the server first
 	ctx := context.Background()
@@ -166,21 +190,23 @@ func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
 	listenerClosedErr := errors.New("listener closed")
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		return &mockListener{
-			acceptFunc: func() (net.Conn, error) {
-				close(signalEnteredAccept)
-				<-signalCloseListener
-				return nil, listenerClosedErr
-			},
-		}, nil
+	listener := &mockNetListener{
+		listenFunc: func(address string) (net.Listener, error) {
+			return &mockListener{
+				acceptFunc: func() (net.Conn, error) {
+					close(signalEnteredAccept)
+					<-signalCloseListener
+					return nil, listenerClosedErr
+				},
+			}, nil
+		},
 	}
-	backoff := func(delay time.Duration) {}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
 		return true
@@ -216,15 +242,17 @@ func TestStart_ReturnsErrorOnListenerError(t *testing.T) {
 	listenerErr := errors.New("listener error")
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		return nil, listenerErr
+	listener := &mockNetListener{
+		listenFunc: func(address string) (net.Listener, error) {
+			return nil, listenerErr
+		},
 	}
-	backoff := func(delay time.Duration) {}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
 		return true
@@ -245,19 +273,21 @@ func TestStart_ReturnsErrorOnListenerAcceptError(t *testing.T) {
 	listenerErr := errors.New("listener accept error")
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		return &mockListener{
-			acceptFunc: func() (net.Conn, error) {
-				return nil, listenerErr
-			},
-		}, nil
+	listener := &mockNetListener{
+		listenFunc: func(address string) (net.Listener, error) {
+			return &mockListener{
+				acceptFunc: func() (net.Conn, error) {
+					return nil, listenerErr
+				},
+			}, nil
+		},
 	}
-	backoff := func(delay time.Duration) {}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
 		return true
@@ -277,28 +307,36 @@ func TestStart_Backoff(t *testing.T) {
 
 	iterations := 9
 	i := 0
-	delays := make([]time.Duration, 0, iterations)
+	backoffCalls := 0
+	resetCalls := 0
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		return &mockListener{
-			acceptFunc: func() (net.Conn, error) {
-				if i < iterations {
-					i++
-					return nil, &mockTimeoutError{}
-				}
-				return nil, errors.New("listener error")
-			},
-		}, nil
+	listener := &mockNetListener{
+		listenFunc: func(address string) (net.Listener, error) {
+			return &mockListener{
+				acceptFunc: func() (net.Conn, error) {
+					if i < iterations {
+						i++
+						return nil, &mockTimeoutError{}
+					}
+					return nil, errors.New("listener error")
+				},
+			}, nil
+		},
 	}
-	backoff := func(delay time.Duration) {
-		delays = append(delays, delay)
+	acceptDelayer := &mockAcceptDelayer{
+		backoffFunc: func() {
+			backoffCalls++
+		},
+		resetFunc: func() {
+			resetCalls++
+		},
 	}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
 		return true
@@ -316,9 +354,28 @@ func TestStart_Backoff(t *testing.T) {
 	require.Error(err)
 
 	// Verify we got the expected number of backoff calls
-	require.Equal(iterations, len(delays))
+	require.Equal(iterations, backoffCalls)
+	// No reset calls since we never successfully accepted a connection
+	require.Equal(0, resetCalls)
+}
+
+func TestExponentialAcceptDelayer_Backoff(t *testing.T) {
+	require := require.New(t)
+
+	delays := make([]time.Duration, 0, 9)
+	sleepFn := func(d time.Duration) {
+		delays = append(delays, d)
+	}
+
+	delayer := NewExponentialAcceptDelayer(5*time.Millisecond, DEFAULT_MAX_ACCEPT_DELAY, sleepFn)
+
+	// Call Backoff 9 times
+	for range 9 {
+		delayer.Backoff()
+	}
 
 	// Verify exponential backoff pattern
+	require.Len(delays, 9)
 	require.Equal(5*time.Millisecond, delays[0])
 	require.Equal(10*time.Millisecond, delays[1])
 	require.Equal(20*time.Millisecond, delays[2])
@@ -332,20 +389,45 @@ func TestStart_Backoff(t *testing.T) {
 	require.Equal(DEFAULT_MAX_ACCEPT_DELAY, delays[8])
 }
 
+func TestExponentialAcceptDelayer_Reset(t *testing.T) {
+	require := require.New(t)
+
+	delays := make([]time.Duration, 0)
+	sleepFn := func(d time.Duration) {
+		delays = append(delays, d)
+	}
+
+	delayer := NewExponentialAcceptDelayer(5*time.Millisecond, DEFAULT_MAX_ACCEPT_DELAY, sleepFn)
+
+	// Call Backoff a few times
+	delayer.Backoff() // 5ms
+	delayer.Backoff() // 10ms
+	delayer.Backoff() // 20ms
+
+	// Reset the delayer
+	delayer.Reset()
+
+	// Call Backoff again - should start from initial value
+	delayer.Backoff() // 5ms
+
+	require.Len(delays, 4)
+	require.Equal(5*time.Millisecond, delays[0])
+	require.Equal(10*time.Millisecond, delays[1])
+	require.Equal(20*time.Millisecond, delays[2])
+	require.Equal(5*time.Millisecond, delays[3]) // Reset back to initial
+}
+
 func TestStop_StopsServerThatHasNeverBeenStarted(t *testing.T) {
 	require := require.New(t)
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		// Can return nil, nil here since listen is never called in the test
-		return nil, nil
-	}
-	backoff := func(delay time.Duration) {}
+	listener := &mockNetListener{}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	// Verify server is idle
 	require.Equal(idle, s.state)
@@ -362,16 +444,13 @@ func TestStop_ReturnsErrorOnAlreadyStopped(t *testing.T) {
 	require := require.New(t)
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		// Can return nil, nil here since listen is never called in the test
-		return nil, nil
-	}
-	backoff := func(delay time.Duration) {}
+	listener := &mockNetListener{}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	// Stop the server once
 	err := s.Stop(t.Context())
@@ -404,30 +483,32 @@ func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
 	var closeAllConnsAcceptedOnce sync.Once
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		return &mockListener{
-			acceptFunc: func() (net.Conn, error) {
-				select {
-				case conn := <-connsCh:
-					// Return one of the pre-created connections
-					return conn, nil
-				default:
-					// Once all connections are accepted, signal the test and return timeout errors
-					// The timeout errors keep the accept loop running without accepting new connections
-					closeAllConnsAcceptedOnce.Do(func() {
-						close(allConnsAccepted)
-					})
-					return nil, &mockTimeoutError{}
-				}
-			},
-		}, nil
+	listener := &mockNetListener{
+		listenFunc: func(address string) (net.Listener, error) {
+			return &mockListener{
+				acceptFunc: func() (net.Conn, error) {
+					select {
+					case conn := <-connsCh:
+						// Return one of the pre-created connections
+						return conn, nil
+					default:
+						// Once all connections are accepted, signal the test and return timeout errors
+						// The timeout errors keep the accept loop running without accepting new connections
+						closeAllConnsAcceptedOnce.Do(func() {
+							close(allConnsAccepted)
+						})
+						return nil, &mockTimeoutError{}
+					}
+				},
+			}, nil
+		},
 	}
-	backoff := func(delay time.Duration) {}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	// Handler that sleeps briefly then closes the connection (returns true)
 	// The sleep simulates work being done on each connection
@@ -483,29 +564,31 @@ func TestStop_ReturnsContextCanceledError(t *testing.T) {
 	var closeAllConnsAcceptedOnce sync.Once
 
 	connProvider := &mockConnectionProvider{}
-	listen := func(address string) (net.Listener, error) {
-		return &mockListener{
-			acceptFunc: func() (net.Conn, error) {
-				select {
-				case conn := <-connsCh:
-					// Return one of the pre-created connections
-					return conn, nil
-				default:
-					// Once all connections are accepted, signal the test and return timeout errors
-					closeAllConnsAcceptedOnce.Do(func() {
-						close(allConnsAccepted)
-					})
-					return nil, &mockTimeoutError{}
-				}
-			},
-		}, nil
+	listener := &mockNetListener{
+		listenFunc: func(address string) (net.Listener, error) {
+			return &mockListener{
+				acceptFunc: func() (net.Conn, error) {
+					select {
+					case conn := <-connsCh:
+						// Return one of the pre-created connections
+						return conn, nil
+					default:
+						// Once all connections are accepted, signal the test and return timeout errors
+						closeAllConnsAcceptedOnce.Do(func() {
+							close(allConnsAccepted)
+						})
+						return nil, &mockTimeoutError{}
+					}
+				},
+			}, nil
+		},
 	}
-	backoff := func(delay time.Duration) {}
+	acceptDelayer := &mockAcceptDelayer{}
 	cfg := ServerConfig{
 		Address: ":8080",
 	}
 
-	s := NewServer(connProvider, listen, backoff, cfg)
+	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
 	// Handler that sleeps for a long time (1 second) to simulate long-running connections
 	// These handlers will still be running when we call Stop() with a canceled context
