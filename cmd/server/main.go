@@ -25,8 +25,8 @@ func main() {
 	keyGen := store.NewTimestampKeyGenerator()
 	store := store.NewInMemoryStreamStore(keyGen)
 
-	bufPool := protocol.NewBufferPool()
-	decoder := protocol.NewCommandDecoder(bufPool)
+	bufProvider := protocol.NewEagerAllocationBufferProvider()
+	decoder := protocol.NewCommandDecoder(bufProvider)
 	encoder := protocol.NewReplyEncoder()
 
 	handler := controller.New(store, decoder, encoder, logger.With("component", "controller"))
