@@ -4,6 +4,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/hastyy/murakami/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,7 +85,7 @@ func TestResetLimits(t *testing.T) {
 	c.ResetLimits()
 
 	// Verify the limit was reset to double the buffer size
-	require.Equal(int64(2*1024), c.lreader.N)
+	require.Equal(int64(protocol.DEFAULT_MAX_APPEND_PAYLOAD_SIZE+1024), c.lreader.N)
 }
 
 func TestBufferedReader(t *testing.T) {

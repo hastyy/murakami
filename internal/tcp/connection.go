@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/hastyy/murakami/internal/protocol"
 )
 
 const (
@@ -38,7 +40,7 @@ type Connection struct {
 // The Connection is created in a detached state (no underlying net.Conn attached).
 // Buffers are pre-allocated to avoid allocations during runtime.
 func NewConnection(readBufferSize, writeBufferSize int) *Connection {
-	lreader := &io.LimitedReader{R: nil, N: int64(readBufferSize * 2)}
+	lreader := &io.LimitedReader{R: nil, N: int64(protocol.DEFAULT_MAX_APPEND_PAYLOAD_SIZE + readBufferSize)}
 	breader := bufio.NewReaderSize(lreader, readBufferSize)
 	bwriter := bufio.NewWriterSize(nil, writeBufferSize)
 	return &Connection{
@@ -68,7 +70,7 @@ func (c *Connection) Detach() {
 // ResetLimits resets the read limit and read/write deadlines for the connection.
 // This should be called before each request/response exchange to enforce fresh limits and timeouts.
 func (c *Connection) ResetLimits() {
-	c.lreader.N = int64(c.breader.Size() * 2)
+	c.lreader.N = int64(protocol.DEFAULT_MAX_APPEND_PAYLOAD_SIZE + c.breader.Size())
 	// Deadline errors are ignored because they rarely fail in practice and typically only occur
 	// when the connection is already closed or invalid (syscall.EINVAL, io.ErrClosedPipe).
 	// If the connection is dead, subsequent I/O operations will fail with appropriate errors anyway.
