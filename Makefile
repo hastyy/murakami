@@ -1,4 +1,4 @@
-.PHONY: build build-server build-client run run-client fmt lint vet test test-race clean
+.PHONY: build build-server build-client run run-client fmt lint vet test test-race benchmark clean
 
 SERVER_BINARY=murakami-server
 CLIENT_BINARY=murakami-client
@@ -41,6 +41,10 @@ test:
 test-race:
 	@echo "Testing with race detector..."
 	@go test -race -v ./...
+
+benchmark:
+	@echo "Running benchmarks..."
+	@go test -bench=. -benchmem ./...
 
 clean:
 	@echo "Cleaning..."
