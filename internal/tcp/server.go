@@ -45,17 +45,19 @@ type Handler interface {
 	// Handle is called for each iteration of the read/write loop of a connection.
 	// The context is passed to the handler to allow for cancellation of the connection handling.
 	// The Connection is passed to the handler to allow for reading and writing to the connection.
-	// It returns a boolean value indicating whether the connection should be closed.
-	Handle(ctx context.Context, conn *Connection) (close bool)
+	// It returns an error if the connection should be closed, nil otherwise.
+	Handle(ctx context.Context, conn *Connection) error
 }
 
 // HandlerFunc can wrap a function with the Handle format and turn it into a Handler.
-type HandlerFunc func(ctx context.Context, conn *Connection) (close bool)
+type HandlerFunc func(ctx context.Context, conn *Connection) error
 
 // Handle implements the Handler interface.
-func (h HandlerFunc) Handle(ctx context.Context, c *Connection) (close bool) {
+func (h HandlerFunc) Handle(ctx context.Context, c *Connection) error {
 	return h(ctx, c)
 }
+
+type Middleware func(h Handler) Handler
 
 // ConnectionProvider represents a connection pool that manages pre-allocated *Connection objects.
 // It enables efficient connection reuse and reduces allocation pressure during server operation.
@@ -338,17 +340,17 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 			// Reset the limits of the ConnectionReadWriter for each iteration
 			c.ResetLimits()
 
-			close := h.Handle(ctx, c)
+			err := h.Handle(ctx, c)
 
 			// Flush the buffered writer to send the response to the client
-			err := c.BufferedWriter().Flush()
-			if err != nil {
+			flushErr := c.BufferedWriter().Flush()
+			if flushErr != nil {
 				// If we can't flush the response, close the connection
 				return
 			}
 
-			if close {
-				// If the handler returns close=true, return so we close the connection and
+			if err != nil {
+				// If the handler returns an error, close the connection and
 				// cleanup any state associated with it.
 				return
 			}

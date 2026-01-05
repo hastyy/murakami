@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hastyy/murakami/internal/controller"
+	"github.com/hastyy/murakami/internal/logging"
 	"github.com/hastyy/murakami/internal/protocol"
 	"github.com/hastyy/murakami/internal/store"
 	"github.com/hastyy/murakami/internal/tcp"
@@ -26,7 +27,7 @@ func (l *netListener) Listen(address string) (net.Listener, error) {
 
 func main() {
 	// Create the base logger
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 
@@ -38,6 +39,7 @@ func main() {
 	encoder := protocol.NewReplyEncoder()
 
 	handler := controller.New(store, decoder, encoder, logger.With("component", "controller"))
+	handlerWithLoggingMiddleware := logging.Middleware(logger, handler)
 
 	connPool := tcp.NewConnectionPool()
 	listener := &netListener{}
@@ -48,7 +50,7 @@ func main() {
 
 	// When the server stops it will return an error (can be nil) through this channel
 	serr := make(chan error, 1)
-	go func() { serr <- srv.Start(handler) }()
+	go func() { serr <- srv.Start(handlerWithLoggingMiddleware) }()
 
 	// When this context is cancelled, we will try to gracefully stop the server
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)

@@ -173,8 +173,8 @@ func TestStart_ReturnsErrorOnAlreadyStopped(t *testing.T) {
 	require.Equal(stopped, s.state)
 
 	// Attempt to start after stopping should return error
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
-		return true
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
+		return errors.New("close connection")
 	})
 
 	err = s.Start(mockHandler)
@@ -208,8 +208,8 @@ func TestStart_ReturnsErrorOnAlreadyStarted(t *testing.T) {
 
 	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
-		return true
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
+		return errors.New("close connection")
 	})
 
 	// Start server in a goroutine and capture the error
@@ -254,8 +254,8 @@ func TestStart_ReturnsErrorOnListenerError(t *testing.T) {
 
 	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
-		return true
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
+		return errors.New("close connection")
 	})
 
 	// Attempt to start should return the listener error
@@ -289,8 +289,8 @@ func TestStart_ReturnsErrorOnListenerAcceptError(t *testing.T) {
 
 	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
-		return true
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
+		return errors.New("close connection")
 	})
 
 	// Attempt to start should return the accept error
@@ -338,8 +338,8 @@ func TestStart_Backoff(t *testing.T) {
 
 	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
-		return true
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
+		return errors.New("close connection")
 	})
 
 	// Start in a goroutine since it will block until the error
@@ -510,11 +510,11 @@ func TestStop_ClosesListenerAndWaitsForConnections(t *testing.T) {
 
 	s := NewServer(connProvider, listener, acceptDelayer, cfg)
 
-	// Handler that sleeps briefly then closes the connection (returns true)
+	// Handler that sleeps briefly then closes the connection (returns error)
 	// The sleep simulates work being done on each connection
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
 		time.Sleep(1 * time.Millisecond)
-		return true
+		return errors.New("close connection")
 	})
 
 	// Start server in a goroutine and capture the error
@@ -592,9 +592,9 @@ func TestStop_ReturnsContextCanceledError(t *testing.T) {
 
 	// Handler that sleeps for a long time (1 second) to simulate long-running connections
 	// These handlers will still be running when we call Stop() with a canceled context
-	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) bool {
+	mockHandler := HandlerFunc(func(ctx context.Context, conn *Connection) error {
 		time.Sleep(1 * time.Second)
-		return false
+		return nil
 	})
 
 	// Start server in background

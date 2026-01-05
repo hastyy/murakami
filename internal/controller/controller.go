@@ -3,10 +3,12 @@ package controller
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 
 	"github.com/hastyy/murakami/internal/assert"
+	"github.com/hastyy/murakami/internal/logging"
 	"github.com/hastyy/murakami/internal/protocol"
 	"github.com/hastyy/murakami/internal/tcp"
 )
@@ -161,157 +163,208 @@ func New(store StreamStore, decoder CommandDecoder, encoder ReplyEncoder, slog *
 
 // Handle processes a single client command from the connection.
 // It decodes the command header, validates the argument count, and routes to the appropriate
-// command handler (CREATE, APPEND, READ, TRIM, DELETE). Returns true if the connection should
-// be closed (due to non-recoverable errors or EOF), false otherwise. Timeout errors are handled
-// specially and do not close the connection, allowing the client to retry.
-func (c *Controller) Handle(ctx context.Context, conn *tcp.Connection) (close bool) {
+// command handler (CREATE, APPEND, READ, TRIM, DELETE). Returns an error if the connection should
+// be closed (due to non-recoverable errors or non-protocol errors), nil otherwise. Timeout errors
+// are handled specially and do not close the connection, allowing the client to retry.
+func (c *Controller) Handle(ctx context.Context, conn *tcp.Connection) error {
 	cmdSpec, err := c.decoder.DecodeNextCommand(conn.BufferedReader())
 	if err != nil {
 		// Check if it's a timeout error - if so, don't close the connection, just retry
 		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-			return false
+			logging.Record(ctx, slog.String("recoverable_error", "timeout"))
+			return nil
 		}
 		// For any other error (including EOF), handle it normally
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Group("command_spec",
+		slog.String("name", cmdSpec.Name),
+		slog.Int("args_length", cmdSpec.ArgsLength)))
 
 	switch cmdSpec.Name {
 	case protocol.CommandCreate:
 		if cmdSpec.ArgsLength != 2 {
-			return c.handleError(protocol.BadFormatErrorf("CREATE command must have 2 arguments"), conn)
+			return c.handleError(ctx, protocol.BadFormatErrorf("CREATE command must have 2 arguments"), conn)
 		}
 		return c.handleCreateCommand(ctx, conn)
 	case protocol.CommandAppend:
 		if cmdSpec.ArgsLength != 3 {
-			return c.handleError(protocol.BadFormatErrorf("APPEND command must have 3 arguments"), conn)
+			return c.handleError(ctx, protocol.BadFormatErrorf("APPEND command must have 3 arguments"), conn)
 		}
 		return c.handleAppendCommand(ctx, conn)
 	case protocol.CommandRead:
 		if cmdSpec.ArgsLength != 2 {
-			return c.handleError(protocol.BadFormatErrorf("READ command must have 2 arguments"), conn)
+			return c.handleError(ctx, protocol.BadFormatErrorf("READ command must have 2 arguments"), conn)
 		}
 		return c.handleReadCommand(ctx, conn)
 	case protocol.CommandTrim:
 		if cmdSpec.ArgsLength != 2 {
-			return c.handleError(protocol.BadFormatErrorf("TRIM command must have 2 arguments"), conn)
+			return c.handleError(ctx, protocol.BadFormatErrorf("TRIM command must have 2 arguments"), conn)
 		}
 		return c.handleTrimCommand(ctx, conn)
 	case protocol.CommandDelete:
 		if cmdSpec.ArgsLength != 2 {
-			return c.handleError(protocol.BadFormatErrorf("DELETE command must have 2 arguments"), conn)
+			return c.handleError(ctx, protocol.BadFormatErrorf("DELETE command must have 2 arguments"), conn)
 		}
 		return c.handleDeleteCommand(ctx, conn)
 	default:
 		c.slog.Error("unknown command", "command", cmdSpec.Name)
-		return c.handleError(protocol.BadFormatErrorf("unknown command: %s", cmdSpec.Name), conn)
+		return c.handleError(ctx, protocol.BadFormatErrorf("unknown command: %s", cmdSpec.Name), conn)
 	}
 }
 
-func (c *Controller) handleCreateCommand(ctx context.Context, conn *tcp.Connection) (close bool) {
+func (c *Controller) handleCreateCommand(ctx context.Context, conn *tcp.Connection) error {
 	cmd, err := c.decoder.DecodeCreateCommand(conn.BufferedReader())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Group("command",
+		slog.String("name", protocol.CommandCreate),
+		slog.Group("args",
+			slog.String("stream_name", cmd.StreamName))))
 
 	err = c.store.CreateStream(ctx, cmd)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
 	err = c.encoder.EncodeOK(conn.BufferedWriter())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
-	return false
+	return nil
 }
 
-func (c *Controller) handleAppendCommand(ctx context.Context, conn *tcp.Connection) (close bool) {
+func (c *Controller) handleAppendCommand(ctx context.Context, conn *tcp.Connection) error {
 	cmd, err := c.decoder.DecodeAppendCommand(conn.BufferedReader())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Group("command",
+		"name", protocol.CommandAppend,
+		slog.Group("args",
+			slog.String("stream_name", cmd.StreamName),
+			slog.Int("records_count", len(cmd.Records)),
+			slog.Group("options", slog.String("millis_id", cmd.Options.MillisID)))))
 
 	id, err := c.store.AppendRecords(ctx, cmd)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.String("last_appended_id", id))
 
 	err = c.encoder.EncodeBulkString(conn.BufferedWriter(), id)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
-	return false
+	return nil
 }
 
-func (c *Controller) handleReadCommand(ctx context.Context, conn *tcp.Connection) (close bool) {
+func (c *Controller) handleReadCommand(ctx context.Context, conn *tcp.Connection) error {
 	cmd, err := c.decoder.DecodeReadCommand(conn.BufferedReader())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Group("command",
+		slog.String("name", protocol.CommandRead),
+		slog.Group("args",
+			slog.String("stream_name", cmd.StreamName),
+			slog.Group("options",
+				slog.Int("count", cmd.Options.Count),
+				slog.Int("block_ms", int(cmd.Options.Block.Milliseconds())),
+				slog.String("min_id", cmd.Options.MinID)))))
 
 	records, err := c.store.ReadRecords(ctx, cmd)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Int("records_count", len(records)))
 
 	err = c.encoder.EncodeRecords(conn.BufferedWriter(), records)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
-	return false
+	return nil
 }
 
-func (c *Controller) handleTrimCommand(ctx context.Context, conn *tcp.Connection) (close bool) {
+func (c *Controller) handleTrimCommand(ctx context.Context, conn *tcp.Connection) error {
 	cmd, err := c.decoder.DecodeTrimCommand(conn.BufferedReader())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Group("command",
+		slog.String("name", protocol.CommandTrim),
+		slog.Group("args",
+			slog.String("stream_name", cmd.StreamName),
+			slog.Group("options",
+				slog.String("min_id", cmd.Options.MinID)))))
 
 	err = c.store.TrimStream(ctx, cmd)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
 	err = c.encoder.EncodeOK(conn.BufferedWriter())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
-	return false
+	return nil
 }
 
-func (c *Controller) handleDeleteCommand(ctx context.Context, conn *tcp.Connection) (close bool) {
+func (c *Controller) handleDeleteCommand(ctx context.Context, conn *tcp.Connection) error {
 	cmd, err := c.decoder.DecodeDeleteCommand(conn.BufferedReader())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
+
+	logging.Record(ctx, slog.Group("command",
+		slog.String("name", protocol.CommandDelete),
+		slog.Group("args",
+			slog.String("stream_name", cmd.StreamName))))
 
 	err = c.store.DeleteStream(ctx, cmd)
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
 	err = c.encoder.EncodeOK(conn.BufferedWriter())
 	if err != nil {
-		return c.handleError(err, conn)
+		return c.handleError(ctx, err, conn)
 	}
 
-	return false
+	return nil
 }
 
-func (c *Controller) handleError(err error, conn *tcp.Connection) (close bool) {
+func (c *Controller) handleError(ctx context.Context, err error, conn *tcp.Connection) error {
 	if perr, ok := protocol.IsProtocolError(err); ok {
-		c.slog.Debug("protocol error", "error", perr)
-		err := c.encoder.EncodeError(conn.BufferedWriter(), perr)
-		if err != nil {
-			c.slog.Error("failed to encode error response", "encode_error", err, "protocol_error", perr)
-			return true // Close connection if we can't send error response
+		logging.Record(ctx, slog.Group("protocol_error",
+			slog.String("code", string(perr.Code)),
+			slog.String("message", perr.Message),
+			slog.Bool("recoverable", perr.IsRecoverable())))
+		encodeErr := c.encoder.EncodeError(conn.BufferedWriter(), perr)
+		if encodeErr != nil {
+			logging.Record(ctx, slog.String("encoding_error", encodeErr.Error()))
+			// Return the encoding error to close the connection if we can't send error response
+			return fmt.Errorf("failed to encode error response: %w", encodeErr)
 		}
-		return !perr.IsRecoverable() // If the error is not recoverable, close the connection
+		// If the error is non-recoverable, wrap it in a normal error and return it
+		if !perr.IsRecoverable() {
+			return fmt.Errorf("non-recoverable protocol error: %w", perr)
+		}
+		// If the error is recoverable, return nil (don't close the connection)
+		return nil
 	}
-	c.slog.Error("error decoding command", "error", err)
-	return true
+	// For non-protocol errors, return them as-is
+	return err
 }

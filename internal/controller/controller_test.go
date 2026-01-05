@@ -169,9 +169,9 @@ func TestHandle_CreateStream_Success(t *testing.T) {
 	require.NotNil(controller)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.False(close)
+	require.NoError(err)
 
 	require.True(encoder.calledEncodeOK)
 	require.False(encoder.calledEncodeError)
@@ -183,19 +183,19 @@ func TestHandle_CreateStream_Success(t *testing.T) {
 
 func TestHandle_DecodeNextCommand_Error(t *testing.T) {
 	tests := []struct {
-		name          string
-		decodeError   error
-		expectedClose bool
+		name        string
+		decodeError error
+		expectError bool
 	}{
 		{
-			name:          "protocol error closes connection",
-			decodeError:   protocol.BadFormatErrorf("invalid command"),
-			expectedClose: true,
+			name:        "protocol error closes connection",
+			decodeError: protocol.BadFormatErrorf("invalid command"),
+			expectError: true,
 		},
 		{
-			name:          "limits error closes connection",
-			decodeError:   protocol.LimitsErrorf("command name too long"),
-			expectedClose: true,
+			name:        "limits error closes connection",
+			decodeError: protocol.LimitsErrorf("command name too long"),
+			expectError: true,
 		},
 	}
 
@@ -212,9 +212,13 @@ func TestHandle_DecodeNextCommand_Error(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectError {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 		})
 	}
@@ -232,9 +236,10 @@ func TestHandle_DecodeNextCommand_NonProtocolError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
+	require.ErrorIs(err, io.EOF)
 	require.False(encoder.calledEncodeError) // Non-protocol errors don't encode errors
 }
 
@@ -250,9 +255,9 @@ func TestHandle_DecodeNextCommand_TimeoutError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.False(close) // Timeout errors don't close the connection
+	require.NoError(err) // Timeout errors don't close the connection
 	require.False(encoder.calledEncodeError)
 }
 
@@ -305,9 +310,9 @@ func TestHandle_BadSpec(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.True(close)
+			require.Error(err)
 			require.True(encoder.calledEncodeError)
 			require.Equal(protocol.ErrCodeBadFormat, encoder.encodedError.Code)
 		})
@@ -329,62 +334,62 @@ func TestHandle_UnknownCommand(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
 	require.True(encoder.calledEncodeError)
 	require.Equal(protocol.ErrCodeBadFormat, encoder.encodedError.Code)
 }
 
 func TestHandle_DecodeCommand_Errors(t *testing.T) {
 	tests := []struct {
-		name          string
-		commandName   string
-		argsLength    int
-		decodeError   error
-		expectedClose bool
+		name        string
+		commandName string
+		argsLength  int
+		decodeError error
+		expectError bool
 	}{
 		{
-			name:          "error decoding CREATE command (non-recoverable)",
-			commandName:   protocol.CommandCreate,
-			argsLength:    2,
-			decodeError:   protocol.BadFormatErrorf("invalid format"),
-			expectedClose: true,
+			name:        "error decoding CREATE command (non-recoverable)",
+			commandName: protocol.CommandCreate,
+			argsLength:  2,
+			decodeError: protocol.BadFormatErrorf("invalid format"),
+			expectError: true,
 		},
 		{
-			name:          "error decoding CREATE command (recoverable)",
-			commandName:   protocol.CommandCreate,
-			argsLength:    2,
-			decodeError:   protocol.StreamExistsErrorf("stream exists"),
-			expectedClose: false,
+			name:        "error decoding CREATE command (recoverable)",
+			commandName: protocol.CommandCreate,
+			argsLength:  2,
+			decodeError: protocol.StreamExistsErrorf("stream exists"),
+			expectError: false,
 		},
 		{
-			name:          "error decoding APPEND command (non-recoverable)",
-			commandName:   protocol.CommandAppend,
-			argsLength:    3,
-			decodeError:   protocol.LimitsErrorf("record too large"),
-			expectedClose: true,
+			name:        "error decoding APPEND command (non-recoverable)",
+			commandName: protocol.CommandAppend,
+			argsLength:  3,
+			decodeError: protocol.LimitsErrorf("record too large"),
+			expectError: true,
 		},
 		{
-			name:          "error decoding READ command (non-recoverable)",
-			commandName:   protocol.CommandRead,
-			argsLength:    2,
-			decodeError:   protocol.BadFormatErrorf("invalid option"),
-			expectedClose: true,
+			name:        "error decoding READ command (non-recoverable)",
+			commandName: protocol.CommandRead,
+			argsLength:  2,
+			decodeError: protocol.BadFormatErrorf("invalid option"),
+			expectError: true,
 		},
 		{
-			name:          "error decoding TRIM command (non-recoverable)",
-			commandName:   protocol.CommandTrim,
-			argsLength:    2,
-			decodeError:   protocol.BadFormatErrorf("missing MIN_ID"),
-			expectedClose: true,
+			name:        "error decoding TRIM command (non-recoverable)",
+			commandName: protocol.CommandTrim,
+			argsLength:  2,
+			decodeError: protocol.BadFormatErrorf("missing MIN_ID"),
+			expectError: true,
 		},
 		{
-			name:          "error decoding DELETE command (non-recoverable)",
-			commandName:   protocol.CommandDelete,
-			argsLength:    2,
-			decodeError:   protocol.LimitsErrorf("stream name too long"),
-			expectedClose: true,
+			name:        "error decoding DELETE command (non-recoverable)",
+			commandName: protocol.CommandDelete,
+			argsLength:  2,
+			decodeError: protocol.LimitsErrorf("stream name too long"),
+			expectError: true,
 		},
 	}
 
@@ -434,9 +439,13 @@ func TestHandle_DecodeCommand_Errors(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectError {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 		})
 	}
@@ -484,9 +493,13 @@ func TestHandle_CreateStream_Errors(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectedClose {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 			require.False(encoder.calledEncodeOK)
 			require.True(store.createStreamCalled)
@@ -512,9 +525,9 @@ func TestHandle_CreateStream_EncodeOKError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
 	require.True(encoder.calledEncodeOK)
 	require.True(store.createStreamCalled)
 }
@@ -539,10 +552,10 @@ func TestHandle_EncodeErrorFailure(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	// Should close connection when we can't send error response
-	require.True(close)
+	// Should return error when we can't send error response
+	require.Error(err)
 	require.True(encoder.calledEncodeError)
 	require.False(store.createStreamCalled)
 }
@@ -597,9 +610,13 @@ func TestHandle_AppendRecords_Errors(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectedClose {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 			require.False(encoder.calledEncodeBulkString)
 			require.True(store.appendRecordsCalled)
@@ -630,9 +647,9 @@ func TestHandle_AppendRecords_EncodeBulkStringError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
 	require.True(encoder.calledEncodeBulkString)
 	require.True(store.appendRecordsCalled)
 }
@@ -658,9 +675,9 @@ func TestHandle_AppendRecords_Success(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.False(close)
+	require.NoError(err)
 	require.True(encoder.calledEncodeBulkString)
 	require.Equal("1234567890-0", encoder.encodedBulkString)
 	require.False(encoder.calledEncodeError)
@@ -711,9 +728,13 @@ func TestHandle_ReadRecords_Errors(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectedClose {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 			require.False(encoder.calledEncodeRecords)
 			require.True(store.readRecordsCalled)
@@ -745,9 +766,9 @@ func TestHandle_ReadRecords_EncodeRecordsError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
 	require.True(encoder.calledEncodeRecords)
 	require.True(store.readRecordsCalled)
 }
@@ -777,9 +798,9 @@ func TestHandle_ReadRecords_Success(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.False(close)
+	require.NoError(err)
 	require.True(encoder.calledEncodeRecords)
 	require.Equal(expectedRecords, encoder.encodedRecords)
 	require.False(encoder.calledEncodeError)
@@ -830,9 +851,13 @@ func TestHandle_TrimStream_Errors(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectedClose {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 			require.False(encoder.calledEncodeOK)
 			require.True(store.trimStreamCalled)
@@ -860,9 +885,9 @@ func TestHandle_TrimStream_EncodeOKError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
 	require.True(encoder.calledEncodeOK)
 	require.True(store.trimStreamCalled)
 }
@@ -885,9 +910,9 @@ func TestHandle_TrimStream_Success(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.False(close)
+	require.NoError(err)
 	require.True(encoder.calledEncodeOK)
 	require.False(encoder.calledEncodeError)
 	require.True(store.trimStreamCalled)
@@ -937,9 +962,13 @@ func TestHandle_DeleteStream_Errors(t *testing.T) {
 			controller := New(store, decoder, encoder, discardLogger)
 
 			conn := tcp.NewConnection(1024, 1024)
-			close := controller.Handle(t.Context(), conn)
+			err := controller.Handle(t.Context(), conn)
 
-			require.Equal(test.expectedClose, close)
+			if test.expectedClose {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+			}
 			require.True(encoder.calledEncodeError)
 			require.False(encoder.calledEncodeOK)
 			require.True(store.deleteStreamCalled)
@@ -967,9 +996,9 @@ func TestHandle_DeleteStream_EncodeOKError(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.True(close)
+	require.Error(err)
 	require.True(encoder.calledEncodeOK)
 	require.True(store.deleteStreamCalled)
 }
@@ -992,9 +1021,9 @@ func TestHandle_DeleteStream_Success(t *testing.T) {
 	controller := New(store, decoder, encoder, discardLogger)
 
 	conn := tcp.NewConnection(1024, 1024)
-	close := controller.Handle(t.Context(), conn)
+	err := controller.Handle(t.Context(), conn)
 
-	require.False(close)
+	require.NoError(err)
 	require.True(encoder.calledEncodeOK)
 	require.False(encoder.calledEncodeError)
 	require.True(store.deleteStreamCalled)
