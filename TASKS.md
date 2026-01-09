@@ -29,3 +29,17 @@ Next steps:
 - add a text logger to each major component, mostly for debug logs
 - create scripts and benchmarks with the client library to test our current implementation
 - start replication work
+
+RAFT IMPROVEMENT:
+
+```
+If desired, the protocol can be optimized to reduce the
+number of rejected AppendEntries RPCs. For example,
+when rejecting an AppendEntries request, the follower
+can include the term of the conflicting entry and the first
+index it stores for that term. With this information, the
+leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+be required for each term with conflicting entries, rather
+than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
+and it is unlikely that there will be many inconsistent entries.
+```

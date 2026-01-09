@@ -43,6 +43,80 @@ func TestNonNil_Panics(t *testing.T) {
 	})
 }
 
+func TestNonZero_Panics(t *testing.T) {
+	// Test that it panics when value is zero for int
+	assertPanics(t, func() {
+		var zero int
+		NonZero(zero, "this should panic")
+	})
+
+	// Test that it panics when value is zero for string
+	assertPanics(t, func() {
+		var zero string
+		NonZero(zero, "this should panic")
+	})
+
+	// Test that it panics when value is zero for bool
+	assertPanics(t, func() {
+		var zero bool
+		NonZero(zero, "this should panic")
+	})
+
+	// Test that it doesn't panic when value is non-zero for int
+	assertNotPanics(t, func() {
+		NonZero(42, "this should not panic")
+	})
+
+	// Test that it doesn't panic when value is non-zero for string
+	assertNotPanics(t, func() {
+		NonZero("hello", "this should not panic")
+	})
+
+	// Test that it doesn't panic when value is non-zero for bool
+	assertNotPanics(t, func() {
+		NonZero(true, "this should not panic")
+	})
+}
+
+func TestNonEmpty_Panics(t *testing.T) {
+	// Test that it panics when slice is nil
+	assertPanics(t, func() {
+		NonEmpty[int](nil, "this should panic")
+	})
+
+	// Test that it panics when slice is empty for int slice
+	assertPanics(t, func() {
+		var empty []int
+		NonEmpty(empty, "this should panic")
+	})
+
+	// Test that it panics when slice is empty for string slice
+	assertPanics(t, func() {
+		var empty []string
+		NonEmpty(empty, "this should panic")
+	})
+
+	// Test that it panics when slice is explicitly empty
+	assertPanics(t, func() {
+		NonEmpty([]int{}, "this should panic")
+	})
+
+	// Test that it doesn't panic when slice is not empty for int slice
+	assertNotPanics(t, func() {
+		NonEmpty([]int{1, 2, 3}, "this should not panic")
+	})
+
+	// Test that it doesn't panic when slice is not empty for string slice
+	assertNotPanics(t, func() {
+		NonEmpty([]string{"hello", "world"}, "this should not panic")
+	})
+
+	// Test that it doesn't panic when slice has one element
+	assertNotPanics(t, func() {
+		NonEmpty([]int{42}, "this should not panic")
+	})
+}
+
 func assertPanics(t *testing.T, f func()) {
 	t.Helper()
 	defer func() {

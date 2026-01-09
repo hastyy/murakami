@@ -41,3 +41,16 @@ func isNil(i any) bool {
 func failedMsgf(format string, args ...any) string {
 	return fmt.Sprintln("assertion failed:", fmt.Sprintf(format, args...))
 }
+
+func NonZero[T comparable](v T, format string, args ...any) {
+	var zero T
+	if v == zero {
+		panic(fmt.Sprintln("assertion failed:", fmt.Sprintf(format, args...)))
+	}
+}
+
+func NonEmpty[T any](v []T, format string, args ...any) {
+	if len(v) == 0 {
+		panic(fmt.Sprintln("assertion failed:", fmt.Sprintf(format, args...)))
+	}
+}
