@@ -176,7 +176,7 @@ func (l *Log) AppendWithTimestamp(data []byte, unixTimestamp int64) (Offset, err
 	}
 
 	// Append the record to the active segment.
-	relativeOffset, err := l.activeSegment.Append(data)
+	relativeOffset, err := l.activeSegment.Append(data, unixTimestamp)
 	if err != nil {
 		return 0, fmt.Errorf("failed to append to active segment: %w", err)
 	}
