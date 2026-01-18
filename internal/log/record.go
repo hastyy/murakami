@@ -1,6 +1,9 @@
 package log
 
 import (
+	"encoding/binary"
+	"hash/crc32"
+	"io"
 	"slices"
 	"sync"
 )
@@ -19,6 +22,33 @@ func newRecord(offset Offset, timestamp int64, data []byte) Record {
 		Timestamp: timestamp,
 		Data:      data,
 	}
+}
+
+// encodeRecord encodes a record to its binary format and stores it in the provided buffer.
+func encodeRecord(r Record, buf []byte) (int, error) {
+	recordBinarySize := recordCRCSize + recordOffsetSize + recordTimestampSize + len(r.Data)
+	totalBinarySize := recordLengthSize + recordBinarySize
+
+	if len(buf) < totalBinarySize {
+		return 0, io.ErrShortBuffer
+	}
+
+	// Write the record size first (length prefix pattern).
+	binary.BigEndian.PutUint32(buf[0:recordLengthSize], uint32(recordBinarySize))
+
+	// Now write the actual record into the buffer, skipping the CRC position for now.
+	pos := recordLengthSize + recordCRCSize                                           // initial position after the length prefix and CRC
+	binary.BigEndian.PutUint64(buf[pos:pos+recordOffsetSize], uint64(r.Offset))       // write offset
+	pos += recordOffsetSize                                                           // advance position
+	binary.BigEndian.PutUint64(buf[pos:pos+recordTimestampSize], uint64(r.Timestamp)) // write timestamp
+	pos += recordTimestampSize                                                        // advance position
+	copy(buf[pos:], r.Data)                                                           // write data
+
+	// Now compute the CRC over the binary fields it covers (offset [bytes 8 - 15], timestamp [bytes 16 - 23], data [bytes 24 - totalBinarySize]).
+	crc := crc32.ChecksumIEEE(buf[recordLengthSize+recordCRCSize : totalBinarySize]) // need to specify :totalBinarySize to cap the []byte slice we pass to CRC otherwise we might give it the remainder of the buffer we're not interested in.
+	binary.BigEndian.PutUint32(buf[recordLengthSize:recordLengthSize+recordCRCSize], crc)
+
+	return totalBinarySize, nil
 }
 
 // recordCacheEntry is a record and its position in the cache.

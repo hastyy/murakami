@@ -34,6 +34,8 @@ type readSegment interface {
 // A log will only contain one active segment at a time, which is always the last one in the segments slice.
 // Each time we (re)start the log, a new active segment is created and all other segments that might already exist
 // are considered sealed even if they haven't been explicitly closed (e.g. after a crash).
+//
+// Each offset and length is relative to the current segment and not the whole log.
 type activeSegment struct {
 	cfg        Config // read-only
 	baseOffset int64  // read-only
@@ -134,25 +136,101 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 	}, nil
 }
 
+// Append appends a record to the active segment.
+// It returns the offset of the record and any error that occurred.
+// When Append successfully returns it just means the record was accepted, not that it was made durable yet.
+// To guarantee durability, the caller must call Sync() after Append().
 func (s *activeSegment) Append(data []byte, unixTimestamp int64) (Offset, error) {
-	return 0, errors.New("not implemented")
+	// Each call to Append() must be fully serialized.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Get the offset and initial byte position for the new record.
+	offset := s.nextOffset
+	position := s.bytePosition
+
+	// Create the record and cache it since it'll land in the logWriter's internal buffer first.
+	r := newRecord(offset, unixTimestamp, data)
+	s.recordCache.Add(r, position)
+
+	// Encode the record into the buffer.
+	n, err := encodeRecord(r, s.recordEncodingBuffer)
+	if err != nil {
+		return 0, fmt.Errorf("failed to encode record: %w", err)
+	}
+	recordBytes := s.recordEncodingBuffer[:n]
+
+	// Write the record to the logWriter.
+	// If the whole record doesn't fit in the buffer, flush it first to avoid writing
+	// part of the record in the .log file and another part in the buffer.
+	// It's best to have each record fully on one side and avoid fragmentation.
+	// This also guarantees atomicity to each append operation.
+	if s.logWriter.Available() < len(recordBytes) {
+		err := s.logWriter.Flush()
+		if err != nil {
+			return 0, fmt.Errorf("failed to flush log writer: %w", err)
+		}
+	}
+	_, err = s.logWriter.Write(recordBytes)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write record: %w", err)
+	}
+
+	// Advance byte position and offset.
+	s.bytePosition += int64(n)
+	s.nextOffset++
+
+	if s.shouldIndex(position) {
+		// Create the index entry and cache it since all index looks in the active segment
+		// are done in through the in-memory index instead of reading the .index file.
+		indexEntry := newIndexEntry(offset, position)
+		s.indexCache = append(s.indexCache, indexEntry)
+
+		// Encode the index entry into the buffer.
+		_, err = encodeIndexEntry(indexEntry, s.indexEncodingBuffer)
+		if err != nil {
+			return 0, fmt.Errorf("failed to encode index entry: %w", err)
+		}
+
+		// Write the entry to the index buffered writer.
+		// We don't expect the buffer to ever flush during normal operation, so we don't check if it will.
+		_, err = s.indexWriter.Write(s.indexEncodingBuffer) // no need to slice because the buffer already has the correct size
+		if err != nil {
+			return 0, fmt.Errorf("failed to write index entry: %w", err)
+		}
+
+		// Advance the last indexed position.
+		s.lastIndexedPosition = position
+	}
+
+	return offset, nil
 }
 
 func (s *activeSegment) Read(offset Offset) (Record, error) {
 	return Record{}, errors.New("not implemented")
 }
 
+// BaseOffset returns the base offset of the segment.
 func (s *activeSegment) BaseOffset() Offset {
-	panic("sealedSegment.BaseOffset() not implemented")
+	// No need to lock here because baseOffset is read-only.
+	return s.baseOffset
 }
 
+// Length returns the number of records in the segment.
+// Length is relative to the current segment and not the whole log.
 func (s *activeSegment) Length() int {
-	panic("sealedSegment.Length() not implemented")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return int(s.nextOffset)
 }
 
 // Size returns the size of the segment in bytes.
 func (s *activeSegment) Size() int {
-	panic("sealedSegment.Size() not implemented")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return int(s.bytePosition)
 }
 
 func (s *activeSegment) Sync() error {
@@ -161,6 +239,13 @@ func (s *activeSegment) Sync() error {
 
 func (s *activeSegment) Close() error {
 	return errors.New("not implemented")
+}
+
+// shouldIndex checks if we should index the current record based on the index interval.
+// If the position is 0, we index the first record.
+// We then continue adding index entries at the byte interval specified by the config.
+func (s *activeSegment) shouldIndex(position int64) bool {
+	return position == 0 || (position-s.lastIndexedPosition >= int64(s.cfg.IndexIntervalBytes))
 }
 
 // sealedSegment is a read-only representation of a sealed segment of the log.

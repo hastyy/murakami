@@ -1,6 +1,10 @@
 package log
 
-import "slices"
+import (
+	"encoding/binary"
+	"io"
+	"slices"
+)
 
 const (
 	// Size of an index entry in bytes: [4 bytes: relative offset] [4 bytes: position].
@@ -23,6 +27,18 @@ func newIndexEntry(relativeOffset Offset, position int64) indexEntry {
 		RelativeOffset: relativeOffset,
 		Position:       position,
 	}
+}
+
+// encodeIndexEntry encodes an index entry into a buffer.
+func encodeIndexEntry(entry indexEntry, buf []byte) (int, error) {
+	if len(buf) < indexEntrySize {
+		return 0, io.ErrShortBuffer
+	}
+
+	binary.BigEndian.PutUint32(buf[0:4], uint32(entry.RelativeOffset))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(entry.Position))
+
+	return indexEntrySize, nil
 }
 
 // indexCache is an in-memory cache of index entries.
