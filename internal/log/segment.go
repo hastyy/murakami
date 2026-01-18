@@ -53,6 +53,7 @@ type activeSegment struct {
 
 	logWriter   *bufio.Writer // protected by mu
 	indexWriter *bufio.Writer // protected by mu
+	logReader   *bufio.Reader // protected by logReadFileMu
 
 	recordEncodingBuffer []byte // protected by mu
 	recordDecodingBuffer []byte // protected by logReadFileMu
@@ -109,9 +110,10 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 	// to keep the buffer and the cache in sync.
 	flushAwareWriter := newFlushAwareWriter(logFile, recordCache.Clear)
 
-	// Create the buffered writers for the log and index files.
+	// Create the buffered writers and reader for the log and index files.
 	logWriter := bufio.NewWriterSize(flushAwareWriter, cfg.LogWriterBufferSize)
 	indexWriter := bufio.NewWriterSize(indexFile, cfg.IndexWriterBufferSize)
+	logReader := bufio.NewReaderSize(logReadFile, cfg.LogReaderBufferSize)
 
 	// Calculate the maximum size of a record in the log file.
 	maxRecordSize := recordLengthSize + recordCRCSize + recordOffsetSize + recordTimestampSize + cfg.MaxRecordDataSize
@@ -133,6 +135,7 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 		logReadFile:          logReadFile,
 		logWriter:            logWriter,
 		indexWriter:          indexWriter,
+		logReader:            logReader,
 		recordEncodingBuffer: recordEncodingBuffer,
 		recordDecodingBuffer: recordDecodingBuffer,
 		indexEncodingBuffer:  indexEncodingBuffer,
@@ -328,10 +331,12 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		return Record{}, fmt.Errorf("failed to seek to position %d in read file: %w", startPosition, err)
 	}
 
-	// TODO: introduce buffered io reader?
+	// Reset the buffered reader to discard any remaining data in the buffer from previous reads.
+	s.logReader.Reset(s.logReadFile)
+
 	for {
 		var recordLength int64
-		err := binary.Read(s.logReadFile, binary.BigEndian, &recordLength)
+		err := binary.Read(s.logReader, binary.BigEndian, &recordLength)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -350,7 +355,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		}
 
 		var recordCRC uint32
-		err = binary.Read(s.logReadFile, binary.BigEndian, &recordCRC)
+		err = binary.Read(s.logReader, binary.BigEndian, &recordCRC)
 		if err != nil {
 			return Record{}, fmt.Errorf("failed to read record CRC: %w", err)
 		}
@@ -358,7 +363,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		// Read the record offset.
 		// Keep it in the decoding buffer to calculate the CRC later on.
 		// This avoids allocating a new buffer.
-		_, err = io.ReadFull(s.logReadFile, s.recordDecodingBuffer[:recordOffsetSize])
+		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[:recordOffsetSize])
 		if err != nil {
 			return Record{}, fmt.Errorf("failed to read record offset: %w", err)
 		}
@@ -371,7 +376,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 
 		// Skip the remaining record bytes.
 		if recordOffset < offset {
-			err = skipBytes(s.logReadFile, recordLength-recordCRCSize-recordOffsetSize)
+			err = skipBytes(s.logReader, recordLength-recordCRCSize-recordOffsetSize)
 			if err != nil {
 				return Record{}, fmt.Errorf("failed to skip remaining record bytes: %w", err)
 			}
@@ -383,7 +388,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		// Read the record timestamp.
 		// Keep it in the decoding buffer to calculate the CRC later on.
 		// This avoids allocating a new buffer.
-		_, err = io.ReadFull(s.logReadFile, s.recordDecodingBuffer[position:position+recordTimestampSize])
+		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[position:position+recordTimestampSize])
 		if err != nil {
 			return Record{}, fmt.Errorf("failed to read record timestamp: %w", err)
 		}
@@ -395,7 +400,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		// Keep it in the decoding buffer to calculate the CRC later on.
 		// This avoids allocating a new buffer.
 		dataSize := int(recordLength - recordCRCSize - recordOffsetSize - recordTimestampSize)
-		_, err = io.ReadFull(s.logReadFile, s.recordDecodingBuffer[position:position+dataSize])
+		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[position:position+dataSize])
 		if err != nil {
 			return Record{}, fmt.Errorf("failed to read record data: %w", err)
 		}

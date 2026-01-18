@@ -42,6 +42,9 @@ type Config struct {
 	// Buffer size for the index writer (buffered IO).
 	IndexWriterBufferSize int
 
+	// Buffer size for the log reader (buffered IO).
+	LogReaderBufferSize int
+
 	// Size of the record cache.
 	RecordCacheSize int
 
@@ -77,6 +80,7 @@ func New(dir string) (*Log, error) {
 		IndexIntervalBytes:    4 * unit.KiB,
 		LogWriterBufferSize:   64 * unit.KiB,
 		IndexWriterBufferSize: 16 * unit.KiB,
+		LogReaderBufferSize:   16 * unit.KiB,
 		RecordCacheSize:       256,
 		IndexCacheSize:        500_000,
 	}
