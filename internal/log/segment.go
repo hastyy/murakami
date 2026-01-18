@@ -2,8 +2,10 @@ package log
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"sync"
@@ -53,6 +55,7 @@ type activeSegment struct {
 	indexWriter *bufio.Writer // protected by mu
 
 	recordEncodingBuffer []byte // protected by mu
+	recordDecodingBuffer []byte // protected by logReadFileMu
 	indexEncodingBuffer  []byte // protected by mu
 
 	recordCache *recordCache // built-in concurrenncy control
@@ -116,6 +119,7 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 	// Create the encoding buffers for the log and index files.
 	// We use a fixed-size buffer for the encoding to avoid unnecessary allocations.
 	recordEncodingBuffer := make([]byte, maxRecordSize)
+	recordDecodingBuffer := make([]byte, maxRecordSize)
 	indexEncodingBuffer := make([]byte, indexEntrySize)
 
 	// Create the index cache to hold all the index entries for the active segment.
@@ -130,6 +134,7 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 		logWriter:            logWriter,
 		indexWriter:          indexWriter,
 		recordEncodingBuffer: recordEncodingBuffer,
+		recordDecodingBuffer: recordDecodingBuffer,
 		indexEncodingBuffer:  indexEncodingBuffer,
 		recordCache:          recordCache,
 		indexCache:           indexCache,
@@ -206,8 +211,40 @@ func (s *activeSegment) Append(data []byte, unixTimestamp int64) (Offset, error)
 	return offset, nil
 }
 
+// Read reads a record from the active segment at the given offset.
+// It returns the record and any error that occurred.
+// It first tries to locate the record in the record cache.
+// If not found, it reads the index and then looks for the record in the read file.
 func (s *activeSegment) Read(offset Offset) (Record, error) {
-	return Record{}, errors.New("not implemented")
+	// Snapshot the state limits under read lock. This gives us a consistent view
+	// of what's "known" at this point. Everything after this snapshot is
+	// being appended concurrently, but everything before is immutable.
+	s.mu.RLock()
+	lastWrittenOffset := s.nextOffset - 1
+	indexCacheLen := len(s.indexCache)
+	s.mu.RUnlock()
+
+	// Check if the offset is greater than the last written offset.
+	// If it is, return an error.
+	// Otherwise we know we must have the record matching this offset, because:
+	// 1. the log called us, meaning if any segment has it is us, and
+	// 2. the offset is within written range (offset <= lastWrittenOffset).
+	if offset > lastWrittenOffset {
+		return Record{}, fmt.Errorf("offset %d is greater than the last written offset %d", offset, lastWrittenOffset)
+	}
+
+	// Try to read from the record cache.
+	recordEntry, found := s.recordCache.Get(offset)
+	if found {
+		return recordEntry.record, nil
+	}
+
+	// At this point we know the record we're looking for needs to be in the file
+	// because the offset is >= than our baseOffset and < than any offset in the record cache
+	indexCacheSnapshot := s.indexCache[:indexCacheLen]
+	indexEntry, _ := indexCacheSnapshot.Find(offset)
+
+	return s.readRecordFromFile(offset, indexEntry.Position)
 }
 
 // BaseOffset returns the base offset of the segment.
@@ -246,6 +283,110 @@ func (s *activeSegment) Close() error {
 // We then continue adding index entries at the byte interval specified by the config.
 func (s *activeSegment) shouldIndex(position int64) bool {
 	return position == 0 || (position-s.lastIndexedPosition >= int64(s.cfg.IndexIntervalBytes))
+}
+
+// readRecordFromFile reads a record from the read file at the given offset.
+// It receives a start position in the file which might match the start of the target record
+// or some other record before it.
+// Pre-condition: offset is >= than our baseOffset and < than any offset in the record cache.
+func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (Record, error) {
+	// Lock the read file to prevent concurrent reads.
+	s.logReadFileMu.Lock()
+	defer s.logReadFileMu.Unlock()
+
+	// Seek to the position of the index entry in the read file.
+	_, err := s.logReadFile.Seek(startPosition, io.SeekStart)
+	if err != nil {
+		return Record{}, fmt.Errorf("failed to seek to position %d in read file: %w", startPosition, err)
+	}
+
+	// TODO: introduce buffered io reader?
+	for {
+		var recordLength int64
+		err := binary.Read(s.logReadFile, binary.BigEndian, &recordLength)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return Record{}, fmt.Errorf("failed to read record length: %w", err)
+		}
+
+		// Reading length 0 means we've already reached the end of the file
+		// and we're reading into the remaining pre-allocated zero'd bytes (linux preallocate)
+		// or the kernel is giving us zero bytes due to truncate() (other platforms).
+		// This will happen when the segment was closed before we've used all the available space
+		// which can happen frequently if we roll segments because the next record doesn't fit
+		// anymore even though there's space left in the .log file.
+		if recordLength == 0 {
+			break
+		}
+
+		var recordCRC uint32
+		err = binary.Read(s.logReadFile, binary.BigEndian, &recordCRC)
+		if err != nil {
+			return Record{}, fmt.Errorf("failed to read record CRC: %w", err)
+		}
+
+		// Read the record offset.
+		// Keep it in the decoding buffer to calculate the CRC later on.
+		// This avoids allocating a new buffer.
+		_, err = io.ReadFull(s.logReadFile, s.recordDecodingBuffer[:recordOffsetSize])
+		if err != nil {
+			return Record{}, fmt.Errorf("failed to read record offset: %w", err)
+		}
+		recordOffset := int64(binary.BigEndian.Uint64(s.recordDecodingBuffer[:recordOffsetSize]))
+
+		// This should never really happen.
+		if recordOffset > offset {
+			return Record{}, fmt.Errorf("unexpected case: found record offset %d greater than the target offset %d while doing a sequential read", recordOffset, offset)
+		}
+
+		// Skip the remaining record bytes.
+		if recordOffset < offset {
+			err = skipBytes(s.logReadFile, recordLength-recordCRCSize-recordOffsetSize)
+			if err != nil {
+				return Record{}, fmt.Errorf("failed to skip remaining record bytes: %w", err)
+			}
+			continue
+		}
+
+		position := recordOffsetSize
+
+		// Read the record timestamp.
+		// Keep it in the decoding buffer to calculate the CRC later on.
+		// This avoids allocating a new buffer.
+		_, err = io.ReadFull(s.logReadFile, s.recordDecodingBuffer[position:position+recordTimestampSize])
+		if err != nil {
+			return Record{}, fmt.Errorf("failed to read record timestamp: %w", err)
+		}
+		recordTimestamp := int64(binary.BigEndian.Uint64(s.recordDecodingBuffer[position : position+recordTimestampSize]))
+
+		position += recordTimestampSize
+
+		// Read the record data.
+		// Keep it in the decoding buffer to calculate the CRC later on.
+		// This avoids allocating a new buffer.
+		dataSize := int(recordLength - recordCRCSize - recordOffsetSize - recordTimestampSize)
+		_, err = io.ReadFull(s.logReadFile, s.recordDecodingBuffer[position:position+dataSize])
+		if err != nil {
+			return Record{}, fmt.Errorf("failed to read record data: %w", err)
+		}
+
+		// Calculate the CRC over the binary fields it covers and check the result against the stored CRC.
+		crc := crc32.ChecksumIEEE(s.recordDecodingBuffer[:position+dataSize])
+		if crc != recordCRC {
+			return Record{}, fmt.Errorf("record CRC mismatch: %d != %d", crc, recordCRC)
+		}
+
+		// Copy the record data into a new buffer.
+		// This avoids returning a slice to the caller that would point to the decoding buffer.
+		data := make([]byte, dataSize)
+		copy(data, s.recordDecodingBuffer[position:position+dataSize])
+
+		return newRecord(recordOffset, recordTimestamp, data), nil
+	}
+
+	return Record{}, errors.New("unexpected end of segment file")
 }
 
 // sealedSegment is a read-only representation of a sealed segment of the log.
@@ -302,6 +443,12 @@ func preallocateDiskSpace(file *os.File, size int64) error {
 	// Fallback: truncate (works on all platforms)
 	// Creates sparse file - not "true" preallocation but sufficient
 	return file.Truncate(size)
+}
+
+// skipBytes consumes the next n bytes from the reader without processing them.
+func skipBytes(r io.Reader, n int64) error {
+	_, err := io.CopyN(io.Discard, r, n)
+	return err
 }
 
 // flushAwareWriter is a writer that sits in between a bufio.Writer and its
