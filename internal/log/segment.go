@@ -270,12 +270,40 @@ func (s *activeSegment) Size() int {
 	return int(s.bytePosition)
 }
 
+// Sync flushes and syncs the active segment to disk.
 func (s *activeSegment) Sync() error {
-	return errors.New("not implemented")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.sync()
 }
 
+// Close closes the active segment by flushing and syncing the records to disk and closing the files.
 func (s *activeSegment) Close() error {
-	return errors.New("not implemented")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := s.sync()
+	if err != nil {
+		return err
+	}
+
+	err = s.logFile.Close()
+	if err != nil {
+		return err
+	}
+
+	err = s.indexFile.Close()
+	if err != nil {
+		return err
+	}
+
+	err = s.logReadFile.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // shouldIndex checks if we should index the current record based on the index interval.
@@ -387,6 +415,31 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 	}
 
 	return Record{}, errors.New("unexpected end of segment file")
+}
+
+// sync flushes and syncs the active segment to disk.
+func (s *activeSegment) sync() error {
+	err := s.logWriter.Flush()
+	if err != nil {
+		return err
+	}
+
+	err = s.indexWriter.Flush()
+	if err != nil {
+		return err
+	}
+
+	err = s.logFile.Sync()
+	if err != nil {
+		return err
+	}
+
+	err = s.indexFile.Sync()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // sealedSegment is a read-only representation of a sealed segment of the log.
