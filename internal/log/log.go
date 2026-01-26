@@ -87,6 +87,18 @@ type Config struct {
 	RetentionDuration time.Duration
 }
 
+// DefaultConfig provides sensible defaults for production use.
+var DefaultConfig = Config{
+	MaxSegmentSize:        1 * unit.GiB,
+	MaxRecordDataSize:     1 * unit.KiB,
+	IndexIntervalBytes:    4 * unit.KiB,
+	LogWriterBufferSize:   64 * unit.KiB,
+	IndexWriterBufferSize: 16 * unit.KiB,
+	LogReaderBufferSize:   16 * unit.KiB,
+	RecordCacheSize:       256,
+	IndexCacheSize:        500_000,
+}
+
 // Log is an append-only, totally-ordered sequence of records ordered by time (append order).
 // Records are appended to the end of the log, and reads proceed left-to-right.
 // Each entry is assigned a unique sequential log entry number (the offset).
@@ -103,23 +115,11 @@ type Log struct {
 	mu sync.RWMutex
 }
 
-// New takes the log directory and attempts to create a new log.
+// New takes the log directory and a configuration, and attempts to create a new log.
 // It initializes all log state, guaranteeing that it at least contains an active segment.
 // If the log already existed (i.e. if there was at least one file in the directory) then it will attempt to recover the log state.
 // If necessary, recovery and repair will be performed on the found last segment.
-func New(dir string) (*Log, error) {
-	// TODO: Move to New() params. We are setting a static configuration for now.
-	cfg := Config{
-		MaxSegmentSize:        1. * unit.GiB,
-		MaxRecordDataSize:     1 * unit.KiB,
-		IndexIntervalBytes:    4 * unit.KiB,
-		LogWriterBufferSize:   64 * unit.KiB,
-		IndexWriterBufferSize: 16 * unit.KiB,
-		LogReaderBufferSize:   16 * unit.KiB,
-		RecordCacheSize:       256,
-		IndexCacheSize:        500_000,
-	}
-
+func New(dir string, cfg Config) (*Log, error) {
 	// Get all existing .log file paths, sorted lexicographically.
 	logFilePaths, err := filepath.Glob(filepath.Join(dir, "*.log"))
 	if err != nil {
@@ -275,7 +275,14 @@ func (l *Log) Read(offset Offset) (Record, error) {
 		targetSegment = l.segments[idx-1]
 	}
 
-	return targetSegment.Read(offset - targetSegment.BaseOffset())
+	record, err := targetSegment.Read(offset - targetSegment.BaseOffset())
+	if err != nil {
+		return Record{}, err
+	}
+
+	// Convert relative offset (stored in segment) to absolute offset (for the user).
+	record.Offset += targetSegment.BaseOffset()
+	return record, nil
 }
 
 // Length returns the number of records in the segment.

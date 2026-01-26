@@ -80,13 +80,15 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 	indexFilePath := indexFilePath(logDir, baseOffset)
 
 	// Open the log file.
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, filePermissions)
+	// Note: We don't use O_APPEND because after preallocation (Truncate), O_APPEND would
+	// write at the end of the preallocated space instead of position 0.
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY, filePermissions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
 
 	// Open the index file.
-	indexFile, err := os.OpenFile(indexFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, filePermissions)
+	indexFile, err := os.OpenFile(indexFilePath, os.O_CREATE|os.O_WRONLY, filePermissions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open index file: %w", err)
 	}
@@ -781,19 +783,19 @@ func binarySearchIndex(indexData []byte, numEntries int, target Offset) int {
 	return result
 }
 
-// segmentAbsoluteFilename returns the absolute filename of a segment.
-func segmentAbsoluteFilename(logDir string, baseOffset Offset) string {
-	return fmt.Sprintf("%s/%020d.log", logDir, baseOffset)
+// segmentBasePath returns the base path of a segment (without extension).
+func segmentBasePath(logDir string, baseOffset Offset) string {
+	return fmt.Sprintf("%s/%020d", logDir, baseOffset)
 }
 
 // logFilePath returns the absolute file path of the log file for a segment.
 func logFilePath(logDir string, baseOffset Offset) string {
-	return fmt.Sprintf("%s.log", segmentAbsoluteFilename(logDir, baseOffset))
+	return fmt.Sprintf("%s.log", segmentBasePath(logDir, baseOffset))
 }
 
 // indexFilePath returns the absolute file path of the index file for a segment.
 func indexFilePath(logDir string, baseOffset Offset) string {
-	return fmt.Sprintf("%s.index", segmentAbsoluteFilename(logDir, baseOffset))
+	return fmt.Sprintf("%s.index", segmentBasePath(logDir, baseOffset))
 }
 
 // preallocateDiskSpace tries to preallocate disk space for a file.

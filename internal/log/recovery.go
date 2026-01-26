@@ -216,7 +216,8 @@ func rebuildIndex(logPath, indexPath string, cfg Config) error {
 		}
 
 		// Skip the remaining record bytes (timestamp + data).
-		remainingSize := recordDataSize(int64(recordLength))
+		// recordDataSize returns just the data portion, so we add timestamp size.
+		remainingSize := recordTimestampSize + recordDataSize(int64(recordLength))
 		_, err = reader.Discard(int(remainingSize))
 		if err != nil {
 			return fmt.Errorf("failed to skip remaining record bytes: %w", err)
