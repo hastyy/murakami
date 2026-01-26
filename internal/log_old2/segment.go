@@ -111,7 +111,7 @@ func newSealedSegment(dir string, baseOffset Offset) (*sealedSegment, error) {
 	}
 
 	//
-	s.setLength()
+	_ = s.setLength()
 
 	return s, nil
 }
@@ -378,8 +378,7 @@ type activeSegment struct {
 	indexCache  indexCache    // protected by mu
 	// <end of state that needs to be synchronized>
 
-	mu            sync.RWMutex
-	logReadFileMu sync.Mutex
+	mu sync.RWMutex
 }
 
 func newActiveSegment(dir string, baseOffset Offset, cfg Config) (*activeSegment, error) {

@@ -41,6 +41,21 @@ func encodeIndexEntry(entry indexEntry, buf []byte) (int, error) {
 	return indexEntrySize, nil
 }
 
+// decodeIndexEntry decodes an index entry from a buffer.
+func decodeIndexEntry(buf []byte) (indexEntry, error) {
+	if len(buf) < indexEntrySize {
+		return indexEntry{}, io.ErrShortBuffer
+	}
+
+	relativeOffset := int64(binary.BigEndian.Uint32(buf[0:4]))
+	position := int64(binary.BigEndian.Uint32(buf[4:8]))
+
+	return indexEntry{
+		RelativeOffset: relativeOffset,
+		Position:       position,
+	}, nil
+}
+
 // indexCache is an in-memory cache of index entries.
 // It should hold all the index entries for the active segment.
 type indexCache []indexEntry

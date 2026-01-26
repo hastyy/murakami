@@ -101,7 +101,7 @@ func New(dataDir, name string) (*Log, error) {
 
 	// TODO: perform clean shutdown check
 	// There's probably and edge case if len(segments) == 0 at this point. If that's the case then we shouldn't have a marker
-	// because most likely this log hasn't existed before. If we have a marker and no segments it means there was a clean shutdown of a compeltely
+	// because most likely this log hasn't existed before. If we have a marker and no segments it means there was a clean shutdown of a completely
 	// empty log. In that case we should just remove the marker.
 	// Think the 'problematic' case is really if we have segments and no marker because that means there was no clean shutdown.
 	// I think in that case it's enough to perform repair on the last segment?
@@ -163,7 +163,7 @@ func (l *Log) rollActiveSegment() error {
 	// First we close the current active segment so it becomes sealed
 	// i.e. turned into it's stable, read-only version.
 	// This also flushes and buffers and syncs files to disk.
-	l.activeSegment.Close()
+	_ = l.activeSegment.Close()
 
 	// We now make the sealed segment counterpart of the segment we just closed
 	// by using the same base offset.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -96,7 +97,7 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 		return nil, fmt.Errorf("failed to preallocate log file: %w", err)
 	}
 
-	//
+	// Open the log read file.
 	logReadFile, err := os.OpenFile(logFilePath, os.O_RDONLY, filePermissions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log read file: %w", err)
@@ -116,7 +117,7 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 	logReader := bufio.NewReaderSize(logReadFile, cfg.LogReaderBufferSize)
 
 	// Calculate the maximum size of a record in the log file.
-	maxRecordSize := recordLengthSize + recordCRCSize + recordOffsetSize + recordTimestampSize + cfg.MaxRecordDataSize
+	maxRecordSize := recordHeaderSize + cfg.MaxRecordDataSize
 
 	// Create the encoding buffers for the log and index files.
 	// We use a fixed-size buffer for the encoding to avoid unnecessary allocations.
@@ -335,7 +336,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 	s.logReader.Reset(s.logReadFile)
 
 	for {
-		var recordLength int64
+		var recordLength uint32
 		err := binary.Read(s.logReader, binary.BigEndian, &recordLength)
 		if err != nil {
 			if err == io.EOF {
@@ -374,9 +375,9 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 			return Record{}, fmt.Errorf("unexpected case: found record offset %d greater than the target offset %d while doing a sequential read", recordOffset, offset)
 		}
 
-		// Skip the remaining record bytes.
+		// Skip the remaining record bytes (timestamp + data).
 		if recordOffset < offset {
-			err = skipBytes(s.logReader, recordLength-recordCRCSize-recordOffsetSize)
+			err = skipBytes(s.logReader, int64(recordLength)-recordCRCSize-recordOffsetSize)
 			if err != nil {
 				return Record{}, fmt.Errorf("failed to skip remaining record bytes: %w", err)
 			}
@@ -399,7 +400,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		// Read the record data.
 		// Keep it in the decoding buffer to calculate the CRC later on.
 		// This avoids allocating a new buffer.
-		dataSize := int(recordLength - recordCRCSize - recordOffsetSize - recordTimestampSize)
+		dataSize := int(recordDataSize(int64(recordLength)))
 		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[position:position+dataSize])
 		if err != nil {
 			return Record{}, fmt.Errorf("failed to read record data: %w", err)
@@ -451,26 +452,333 @@ func (s *activeSegment) sync() error {
 // Sealed segments are immutable and can be shared between multiple readers.
 // A segment becomes sealed after explicitly closing an active segment (be it because of a roll or shutdown),
 // or when we restart the log after a crash.
-type sealedSegment struct{}
+type sealedSegment struct {
+	baseOffset Offset // read-only after construction
+
+	length int // cached record count, lazily computed on first Length() call; protected by mu
+
+	logData   []byte // mmap'd .log file; protected by mu
+	indexData []byte // mmap'd .index file; protected by mu
+
+	logFile   *os.File // protected by mu
+	indexFile *os.File // protected by mu
+
+	mu sync.RWMutex
+}
 
 func newSealedSegment(logDir string, baseOffset Offset) (*sealedSegment, error) {
-	return nil, errors.New("not implemented")
+	// Get the absolute file paths for the log and index files.
+	logFilePath := logFilePath(logDir, baseOffset)
+	indexFilePath := indexFilePath(logDir, baseOffset)
+
+	// Open the log file.
+	logFile, err := os.OpenFile(logFilePath, os.O_RDONLY, filePermissions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+
+	// Open the index file.
+	indexFile, err := os.OpenFile(indexFilePath, os.O_RDONLY, filePermissions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open index file: %w", err)
+	}
+
+	//
+	logStat, err := logFile.Stat()
+	if err != nil {
+		_ = logFile.Close()
+		_ = indexFile.Close()
+		return nil, fmt.Errorf("stat log file: %w", err)
+	}
+
+	//
+	indexStat, err := indexFile.Stat()
+	if err != nil {
+		_ = logFile.Close()
+		_ = indexFile.Close()
+		return nil, fmt.Errorf("stat index file: %w", err)
+	}
+
+	//
+	var logData []byte
+	if logData, err = syscall.Mmap(
+		int(logFile.Fd()),   // file descriptor
+		0,                   // offset
+		int(logStat.Size()), // length
+		syscall.PROT_READ,   // read-only
+		syscall.MAP_SHARED,  // shared mapping
+	); err != nil {
+		_ = logFile.Close()
+		_ = indexFile.Close()
+		return nil, fmt.Errorf("mmap log file: %w", err)
+	}
+
+	//
+	var indexData []byte
+	if indexData, err = syscall.Mmap(
+		int(indexFile.Fd()),   // file descriptor
+		0,                     // offset
+		int(indexStat.Size()), // length
+		syscall.PROT_READ,     // read-only
+		syscall.MAP_SHARED,    // shared mapping
+	); err != nil {
+		if logData != nil {
+			_ = syscall.Munmap(logData)
+		}
+		_ = logFile.Close()
+		_ = indexFile.Close()
+		return nil, fmt.Errorf("mmap index file: %w", err)
+	}
+
+	// Give hints to OS about access patterns (Linux-specific optimization).
+	adviseMemoryAccessPatterns(logData, indexData)
+
+	return &sealedSegment{
+		baseOffset: baseOffset,
+		logData:    logData,
+		indexData:  indexData,
+		logFile:    logFile,
+		indexFile:  indexFile,
+	}, nil
 }
 
+// Read reads a record from the sealed segment at the given relative offset.
+// It uses the mmap'd index to find the starting position and scans the log data.
 func (s *sealedSegment) Read(offset Offset) (Record, error) {
-	return Record{}, errors.New("not implemented")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Check if segment has been closed.
+	if s.logData == nil {
+		return Record{}, errors.New("segment is closed")
+	}
+
+	// Find the starting byte position using the index.
+	position := s.findStartingBytePosition(offset)
+
+	for position < int64(len(s.logData)) {
+		// Read the record length.
+		recordLength := int64(binary.BigEndian.Uint32(s.logData[position : position+recordLengthSize]))
+
+		// Reading length 0 means we've already reached the end of the file
+		// and we're reading into the remaining pre-allocated zero'd bytes (linux preallocate)
+		// or the kernel is giving us zero bytes due to truncate() (other platforms).
+		if recordLength == 0 {
+			break
+		}
+		position += recordLengthSize
+
+		// Read the record CRC.
+		recordCRC := binary.BigEndian.Uint32(s.logData[position : position+recordCRCSize])
+		position += recordCRCSize
+
+		// Read the record offset.
+		recordOffset := int64(binary.BigEndian.Uint64(s.logData[position : position+recordOffsetSize]))
+		position += recordOffsetSize
+
+		// This should never really happen.
+		if recordOffset > offset {
+			return Record{}, fmt.Errorf("unexpected case: found record offset %d greater than the target offset %d while doing a sequential read", recordOffset, offset)
+		}
+
+		// Skip the remaining record bytes if this is not the target record (timestamp + data).
+		if recordOffset < offset {
+			position += recordLength - recordCRCSize - recordOffsetSize
+			continue
+		}
+
+		// We found the target record. Now read the remaining fields.
+		recordTimestamp := int64(binary.BigEndian.Uint64(s.logData[position : position+recordTimestampSize]))
+		position += recordTimestampSize
+
+		dataSize := recordDataSize(recordLength)
+
+		// Verify CRC over the binary fields it covers (offset, timestamp, data).
+		crcStart := position - recordOffsetSize - recordTimestampSize
+		crcEnd := position + dataSize
+		crc := crc32.ChecksumIEEE(s.logData[crcStart:crcEnd])
+		if crc != recordCRC {
+			return Record{}, fmt.Errorf("record CRC mismatch: %d != %d", crc, recordCRC)
+		}
+
+		// Copy the record data into a new buffer.
+		// This avoids returning a slice that points directly to the mmap'd region.
+		data := make([]byte, dataSize)
+		copy(data, s.logData[position:position+dataSize])
+
+		return newRecord(recordOffset, recordTimestamp, data), nil
+	}
+
+	return Record{}, errors.New("unexpected end of segment file")
 }
 
+// BaseOffset returns the base offset of the segment.
 func (s *sealedSegment) BaseOffset() Offset {
-	panic("sealedSegment.BaseOffset() not implemented")
+	return s.baseOffset
 }
 
+// Length returns the number of records in the segment.
+// The value is lazily computed on the first call and cached for subsequent calls.
 func (s *sealedSegment) Length() int {
-	panic("sealedSegment.Length() not implemented")
+	// Try read lock first for the common case where length is already computed.
+	s.mu.RLock()
+	if s.length > 0 {
+		length := s.length
+		s.mu.RUnlock()
+		return length
+	}
+	s.mu.RUnlock()
+
+	// Need to compute - acquire write lock.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine may have computed it).
+	if s.length > 0 {
+		return s.length
+	}
+
+	// Compute the length by scanning from the last index entry.
+	s.length = s.computeLength()
+	return s.length
 }
 
+// computeLength scans the segment from the last index entry to count all records.
+func (s *sealedSegment) computeLength() int {
+	// Handle empty index case.
+	if len(s.indexData) == 0 {
+		return s.countRecordsFromPosition(0, 0)
+	}
+
+	// Get the last index entry.
+	lastIndexEntryPosition := len(s.indexData) - indexEntrySize
+	lastIndexEntryBytes := s.indexData[lastIndexEntryPosition : lastIndexEntryPosition+indexEntrySize]
+	indexEntry, err := decodeIndexEntry(lastIndexEntryBytes)
+	if err != nil {
+		// If we can't decode, fall back to scanning from the beginning.
+		return s.countRecordsFromPosition(0, 0)
+	}
+
+	// Count records starting from the last indexed position.
+	return s.countRecordsFromPosition(indexEntry.Position, int(indexEntry.RelativeOffset))
+}
+
+// countRecordsFromPosition counts records starting from a given byte position and initial offset.
+func (s *sealedSegment) countRecordsFromPosition(startPosition int64, initialCount int) int {
+	count := initialCount
+	position := startPosition
+
+	for position < int64(len(s.logData)) {
+		// Read the record length.
+		recordLength := int64(binary.BigEndian.Uint32(s.logData[position : position+recordLengthSize]))
+
+		// Reading length 0 means we've reached the end of valid records.
+		if recordLength == 0 {
+			break
+		}
+
+		// Skip to the next record.
+		position += recordLengthSize + recordLength
+		count++
+	}
+
+	return count
+}
+
+// Close unmaps the memory-mapped files and closes the file handles.
 func (s *sealedSegment) Close() error {
-	return errors.New("not implemented")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var errs []error
+
+	// Unmap the log data.
+	if s.logData != nil {
+		if err := syscall.Munmap(s.logData); err != nil {
+			errs = append(errs, fmt.Errorf("failed to unmap log data: %w", err))
+		}
+		s.logData = nil
+	}
+
+	// Unmap the index data.
+	if s.indexData != nil {
+		if err := syscall.Munmap(s.indexData); err != nil {
+			errs = append(errs, fmt.Errorf("failed to unmap index data: %w", err))
+		}
+		s.indexData = nil
+	}
+
+	// Close the log file.
+	if s.logFile != nil {
+		if err := s.logFile.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close log file: %w", err))
+		}
+		s.logFile = nil
+	}
+
+	// Close the index file.
+	if s.indexFile != nil {
+		if err := s.indexFile.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close index file: %w", err))
+		}
+		s.indexFile = nil
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	return nil
+}
+
+// findStartingBytePosition finds the starting byte position of the record at the given offset
+// or the closest position before the given offset using binary search on the index.
+func (s *sealedSegment) findStartingBytePosition(offset Offset) int64 {
+	numIndexEntries := len(s.indexData) / indexEntrySize
+
+	// Handle empty index case.
+	if numIndexEntries == 0 {
+		return 0
+	}
+
+	// Binary search to find the entry with the largest offset <= target offset.
+	idx := binarySearchIndex(s.indexData, numIndexEntries, offset)
+
+	// Read the index entry at the found position.
+	entryStart := idx * indexEntrySize
+	entry, err := decodeIndexEntry(s.indexData[entryStart : entryStart+indexEntrySize])
+	if err != nil {
+		// Not expected to happen, but fall back to start of file.
+		return 0
+	}
+
+	return entry.Position
+}
+
+// binarySearchIndex performs binary search on the index data to find the entry
+// with the largest RelativeOffset that is <= the target offset.
+func binarySearchIndex(indexData []byte, numEntries int, target Offset) int {
+	low, high := 0, numEntries-1
+	result := 0
+
+	for low <= high {
+		mid := (low + high) / 2
+		entryStart := mid * indexEntrySize
+		entry, err := decodeIndexEntry(indexData[entryStart : entryStart+indexEntrySize])
+		if err != nil {
+			// Not expected to happen.
+			break
+		}
+
+		if entry.RelativeOffset <= target {
+			result = mid
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+
+	return result
 }
 
 // segmentAbsoluteFilename returns the absolute filename of a segment.
