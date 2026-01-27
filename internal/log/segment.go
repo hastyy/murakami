@@ -47,25 +47,23 @@ type activeSegment struct {
 	nextOffset          int64 // protected by mu
 	bytePosition        int64 // protected by mu
 	lastIndexedPosition int64 // protected by mu
+	flushedPosition     int64 // protected by mu; byte position up to which data is on disk
 
-	logFile     *os.File // protected by mu
-	indexFile   *os.File // protected by mu
-	logReadFile *os.File // protected by logReadFileMu
+	logFile   *os.File // protected by mu
+	indexFile *os.File // protected by mu
 
 	logWriter   *bufio.Writer // protected by mu
 	indexWriter *bufio.Writer // protected by mu
-	logReader   *bufio.Reader // protected by logReadFileMu
 
+	logMmap              []byte // mmap'd view of the preallocated log file for fast reads
 	recordEncodingBuffer []byte // protected by mu
-	recordDecodingBuffer []byte // protected by logReadFileMu
 	indexEncodingBuffer  []byte // protected by mu
 
-	recordCache *recordCache // built-in concurrenncy control
+	recordCache *recordCache // built-in concurrency control
 	indexCache  indexCache   // protected by mu
 	// <end of state that needs to be synchronized>
 
-	mu            sync.RWMutex
-	logReadFileMu sync.Mutex
+	mu sync.RWMutex
 }
 
 func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegment, error) {
@@ -99,52 +97,65 @@ func newActiveSegment(logDir string, baseOffset Offset, cfg Config) (*activeSegm
 		return nil, fmt.Errorf("failed to preallocate log file: %w", err)
 	}
 
-	// Open the log read file.
+	// Open a read-only file descriptor for mmap.
 	logReadFile, err := os.OpenFile(logFilePath, os.O_RDONLY, filePermissions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log read file: %w", err)
 	}
 
+	// mmap the preallocated log file for fast reads.
+	// The file is already preallocated to MaxSegmentSize, so we map the entire region.
+	logMmap, err := syscall.Mmap(
+		int(logReadFile.Fd()),
+		0,
+		cfg.MaxSegmentSize,
+		syscall.PROT_READ,
+		syscall.MAP_SHARED,
+	)
+	if err != nil {
+		_ = logReadFile.Close()
+		return nil, fmt.Errorf("failed to mmap log file: %w", err)
+	}
+
+	// Close the read file descriptor - the mmap keeps the mapping alive.
+	if err := logReadFile.Close(); err != nil {
+		_ = syscall.Munmap(logMmap)
+		return nil, fmt.Errorf("failed to close log read file after mmap: %w", err)
+	}
+
 	// Create the record cache to hold a copy of the records still in the buffered writer's internal buffer.
 	recordCache := newRecordCache(cfg.RecordCacheSize)
 
-	// flushAwareWriter wraps the logFile to detect when its .Write() method is called
-	// (meaning the buffered writer has flushed) and calls the recordCache.Clear() method
-	// to keep the buffer and the cache in sync.
-	flushAwareWriter := newFlushAwareWriter(logFile, recordCache.Clear)
-
-	// Create the buffered writers and reader for the log and index files.
-	logWriter := bufio.NewWriterSize(flushAwareWriter, cfg.LogWriterBufferSize)
-	indexWriter := bufio.NewWriterSize(indexFile, cfg.IndexWriterBufferSize)
-	logReader := bufio.NewReaderSize(logReadFile, cfg.LogReaderBufferSize)
-
-	// Calculate the maximum size of a record in the log file.
-	maxRecordSize := recordHeaderSize + cfg.MaxRecordDataSize
-
-	// Create the encoding buffers for the log and index files.
-	// We use a fixed-size buffer for the encoding to avoid unnecessary allocations.
-	recordEncodingBuffer := make([]byte, maxRecordSize)
-	recordDecodingBuffer := make([]byte, maxRecordSize)
-	indexEncodingBuffer := make([]byte, indexEntrySize)
-
-	// Create the index cache to hold all the index entries for the active segment.
-	indexCache := newIndexCache(cfg.IndexCacheSize)
-
-	return &activeSegment{
-		cfg:                  cfg,
-		baseOffset:           baseOffset,
-		logFile:              logFile,
-		indexFile:            indexFile,
-		logReadFile:          logReadFile,
-		logWriter:            logWriter,
-		indexWriter:          indexWriter,
-		logReader:            logReader,
-		recordEncodingBuffer: recordEncodingBuffer,
-		recordDecodingBuffer: recordDecodingBuffer,
-		indexEncodingBuffer:  indexEncodingBuffer,
+	// Create the segment struct first so we can reference it in the callback.
+	seg := &activeSegment{
+		cfg:        cfg,
+		baseOffset: baseOffset,
+		logFile:    logFile,
+		indexFile:  indexFile,
+		logMmap:    logMmap,
+		// logWriter and indexWriter are set below
+		recordEncodingBuffer: make([]byte, recordHeaderSize+cfg.MaxRecordDataSize),
+		indexEncodingBuffer:  make([]byte, indexEntrySize),
 		recordCache:          recordCache,
-		indexCache:           indexCache,
-	}, nil
+		indexCache:           newIndexCache(cfg.IndexCacheSize),
+	}
+
+	// flushAwareWriter wraps the logFile to detect when its .Write() method is called
+	// (meaning the buffered writer has flushed). On flush, we:
+	// 1. Clear the record cache (flushed records are now in mmap)
+	// 2. Advance flushedPosition so reads can use mmap
+	flushAwareWriter := newFlushAwareWriter(logFile, func(bytesWritten int) {
+		// This is called while holding mu (from Append's flush or Sync),
+		// so we can safely update flushedPosition without additional locking.
+		seg.flushedPosition += int64(bytesWritten)
+		seg.recordCache.Clear()
+	})
+
+	// Create the buffered writers for the log and index files.
+	seg.logWriter = bufio.NewWriterSize(flushAwareWriter, cfg.LogWriterBufferSize)
+	seg.indexWriter = bufio.NewWriterSize(indexFile, cfg.IndexWriterBufferSize)
+
+	return seg, nil
 }
 
 // Append appends a record to the active segment.
@@ -219,8 +230,8 @@ func (s *activeSegment) Append(data []byte, unixTimestamp int64) (Offset, error)
 
 // Read reads a record from the active segment at the given offset.
 // It returns the record and any error that occurred.
-// It first tries to locate the record in the record cache.
-// If not found, it reads the index and then looks for the record in the read file.
+// It first tries to locate the record in the record cache (unflushed data).
+// If not found, it reads from the mmap'd region (flushed data).
 func (s *activeSegment) Read(offset Offset) (Record, error) {
 	// Snapshot the state limits under read lock. This gives us a consistent view
 	// of what's "known" at this point. Everything after this snapshot is
@@ -239,18 +250,26 @@ func (s *activeSegment) Read(offset Offset) (Record, error) {
 		return Record{}, fmt.Errorf("offset %d is greater than the last written offset %d", offset, lastWrittenOffset)
 	}
 
-	// Try to read from the record cache.
+	// Try to read from the record cache (unflushed records still in write buffer).
 	recordEntry, found := s.recordCache.Get(offset)
 	if found {
 		return recordEntry.record, nil
 	}
 
-	// At this point we know the record we're looking for needs to be in the file
-	// because the offset is >= than our baseOffset and < than any offset in the record cache
+	// Record is not in cache - it must be flushed to disk.
+	// Re-read flushedPosition to get the most up-to-date value.
+	// This is necessary because a flush could have occurred between our initial
+	// snapshot and the cache lookup, which would have cleared the cache and
+	// advanced flushedPosition.
+	s.mu.RLock()
+	flushedPos := s.flushedPosition
+	s.mu.RUnlock()
+
+	// Use the index cache to find the starting position.
 	indexCacheSnapshot := s.indexCache[:indexCacheLen]
 	indexEntry, _ := indexCacheSnapshot.Find(offset)
 
-	return s.readRecordFromFile(offset, indexEntry.Position)
+	return s.readRecordFromMmap(offset, indexEntry.Position, flushedPos)
 }
 
 // BaseOffset returns the base offset of the segment.
@@ -289,24 +308,30 @@ func (s *activeSegment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	err := s.sync()
-	if err != nil {
-		return err
+	var errs []error
+
+	if err := s.sync(); err != nil {
+		errs = append(errs, err)
 	}
 
-	err = s.logFile.Close()
-	if err != nil {
-		return err
+	// Unmap the log mmap.
+	if s.logMmap != nil {
+		if err := syscall.Munmap(s.logMmap); err != nil {
+			errs = append(errs, fmt.Errorf("failed to munmap log: %w", err))
+		}
+		s.logMmap = nil
 	}
 
-	err = s.indexFile.Close()
-	if err != nil {
-		return err
+	if err := s.logFile.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("failed to close log file: %w", err))
 	}
 
-	err = s.logReadFile.Close()
-	if err != nil {
-		return err
+	if err := s.indexFile.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("failed to close index file: %w", err))
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
@@ -319,99 +344,60 @@ func (s *activeSegment) shouldIndex(position int64) bool {
 	return position == 0 || (position-s.lastIndexedPosition >= int64(s.cfg.IndexIntervalBytes))
 }
 
-// readRecordFromFile reads a record from the read file at the given offset.
-// It receives a start position in the file which might match the start of the target record
+// readRecordFromMmap reads a record from the mmap'd region at the given offset.
+// It receives a start position which might match the start of the target record
 // or some other record before it.
-// Pre-condition: offset is >= than our baseOffset and < than any offset in the record cache.
-func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (Record, error) {
-	// Lock the read file to prevent concurrent reads.
-	s.logReadFileMu.Lock()
-	defer s.logReadFileMu.Unlock()
+// Pre-condition: offset corresponds to a flushed record (not in record cache).
+func (s *activeSegment) readRecordFromMmap(offset Offset, startPosition int64, flushedPosition int64) (Record, error) {
+	position := startPosition
 
-	// Seek to the position of the index entry in the read file.
-	_, err := s.logReadFile.Seek(startPosition, io.SeekStart)
-	if err != nil {
-		return Record{}, fmt.Errorf("failed to seek to position %d in read file: %w", startPosition, err)
-	}
+	for position < flushedPosition {
+		// Read the record length.
+		recordLength := int64(binary.BigEndian.Uint32(s.logMmap[position : position+recordLengthSize]))
 
-	// Reset the buffered reader to discard any remaining data in the buffer from previous reads.
-	s.logReader.Reset(s.logReadFile)
-
-	// Use a slice of the decoding buffer for the fixed-size header (length + CRC = 8 bytes).
-	// This avoids allocations from binary.Read which uses reflection internally.
-	headerBuf := s.recordDecodingBuffer[:recordLengthSize+recordCRCSize]
-
-	for {
-		// Read length + CRC together (8 bytes) into pre-allocated buffer.
-		_, err := io.ReadFull(s.logReader, headerBuf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return Record{}, fmt.Errorf("failed to read record header: %w", err)
-		}
-
-		recordLength := binary.BigEndian.Uint32(headerBuf[:recordLengthSize])
-
-		// Reading length 0 means we've already reached the end of the file
-		// and we're reading into the remaining pre-allocated zero'd bytes (linux preallocate)
-		// or the kernel is giving us zero bytes due to truncate() (other platforms).
-		// This will happen when the segment was closed before we've used all the available space
-		// which can happen frequently if we roll segments because the next record doesn't fit
-		// anymore even though there's space left in the .log file.
+		// Reading length 0 means we've reached the end of valid records.
 		if recordLength == 0 {
 			break
 		}
+		position += recordLengthSize
 
-		recordCRC := binary.BigEndian.Uint32(headerBuf[recordLengthSize:])
+		// Read the record CRC.
+		recordCRC := binary.BigEndian.Uint32(s.logMmap[position : position+recordCRCSize])
+		position += recordCRCSize
 
-		// Read the record offset into the decoding buffer (after the header portion).
-		// We reuse the buffer starting at position 0 for the CRC-covered fields.
-		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[:recordOffsetSize])
-		if err != nil {
-			return Record{}, fmt.Errorf("failed to read record offset: %w", err)
-		}
-		recordOffset := int64(binary.BigEndian.Uint64(s.recordDecodingBuffer[:recordOffsetSize]))
+		// Read the record offset.
+		recordOffset := int64(binary.BigEndian.Uint64(s.logMmap[position : position+recordOffsetSize]))
+		position += recordOffsetSize
 
 		// This should never really happen.
 		if recordOffset > offset {
 			return Record{}, fmt.Errorf("unexpected case: found record offset %d greater than the target offset %d while doing a sequential read", recordOffset, offset)
 		}
 
-		// Skip the remaining record bytes (timestamp + data) for non-target records.
-		// Use Discard instead of skipBytes to avoid allocating a new buffer.
+		// Skip the remaining record bytes if this is not the target record (timestamp + data).
 		if recordOffset < offset {
-			toSkip := int(recordLength) - recordCRCSize - recordOffsetSize
-			if _, err := s.logReader.Discard(toSkip); err != nil {
-				return Record{}, fmt.Errorf("failed to skip remaining record bytes: %w", err)
-			}
+			position += recordLength - recordCRCSize - recordOffsetSize
 			continue
 		}
 
-		// Found the target record. Read the remaining fields (timestamp + data).
-		remainingSize := int(recordLength) - recordCRCSize - recordOffsetSize
-		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[recordOffsetSize:recordOffsetSize+remainingSize])
-		if err != nil {
-			return Record{}, fmt.Errorf("failed to read record body: %w", err)
-		}
+		// We found the target record. Now read the remaining fields.
+		recordTimestamp := int64(binary.BigEndian.Uint64(s.logMmap[position : position+recordTimestampSize]))
+		position += recordTimestampSize
 
-		// Parse timestamp from buffer.
-		recordTimestamp := int64(binary.BigEndian.Uint64(s.recordDecodingBuffer[recordOffsetSize : recordOffsetSize+recordTimestampSize]))
+		dataSize := recordDataSize(recordLength)
 
-		// Calculate data size and position.
-		dataSize := remainingSize - recordTimestampSize
-		dataStart := recordOffsetSize + recordTimestampSize
-
-		// Calculate the CRC over the binary fields it covers (offset + timestamp + data).
-		crc := crc32.ChecksumIEEE(s.recordDecodingBuffer[:recordOffsetSize+remainingSize])
+		// Verify CRC over the binary fields it covers (offset, timestamp, data).
+		crcStart := position - recordOffsetSize - recordTimestampSize
+		crcEnd := position + dataSize
+		crc := crc32.ChecksumIEEE(s.logMmap[crcStart:crcEnd])
 		if crc != recordCRC {
 			return Record{}, fmt.Errorf("record CRC mismatch: %d != %d", crc, recordCRC)
 		}
 
 		// Copy the record data into a new buffer.
-		// This avoids returning a slice to the caller that would point to the decoding buffer.
+		// This avoids returning a slice that points directly to the mmap'd region.
 		data := make([]byte, dataSize)
-		copy(data, s.recordDecodingBuffer[dataStart:dataStart+dataSize])
+		copy(data, s.logMmap[position:position+dataSize])
 
 		return newRecord(recordOffset, recordTimestamp, data), nil
 	}
@@ -811,14 +797,14 @@ func preallocateDiskSpace(file *os.File, size int64) error {
 // underlying writer.
 // Because bufio.Writer only writes to the underlying writer when Flush() is called,
 // flushAwareWriter.Write() is called on every Flush(), which presents an opportunity to
-// perform additional actions, such as clearing a cache.
+// perform additional actions, such as clearing a cache and tracking flushed bytes.
 type flushAwareWriter struct {
 	w       io.Writer
-	onFlush func()
+	onFlush func(bytesWritten int)
 }
 
 // newFlushAwareWriter creates a new flushAwareWriter.
-func newFlushAwareWriter(w io.Writer, onFlush func()) *flushAwareWriter {
+func newFlushAwareWriter(w io.Writer, onFlush func(bytesWritten int)) *flushAwareWriter {
 	return &flushAwareWriter{
 		w:       w,
 		onFlush: onFlush,
@@ -832,6 +818,6 @@ func (w *flushAwareWriter) Write(p []byte) (n int, err error) {
 		return n, err
 	}
 
-	w.onFlush()
+	w.onFlush(n)
 	return n, nil
 }

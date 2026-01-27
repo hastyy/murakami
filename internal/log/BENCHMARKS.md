@@ -90,11 +90,11 @@ Reading from the currently active (writable) segment.
 
 | Access Pattern | Throughput | Latency | Ops/sec | Allocations |
 |----------------|------------|---------|---------|-------------|
-| Sequential | 81 MB/s | 3.2 µs/op | ~316K | 1 alloc |
-| Random | 74 MB/s | 3.5 µs/op | ~287K | 1 alloc |
-| Hot | 83 MB/s | 3.1 µs/op | ~324K | 1 alloc |
+| Sequential | 1,547 MB/s | 166 ns/op | ~6.0M | 1 alloc |
+| Random | 1,069 MB/s | 240 ns/op | ~4.2M | 1 alloc |
+| Hot | 1,457 MB/s | 176 ns/op | ~5.7M | 1 alloc |
 
-**Key Finding:** Active segment reads are ~20x slower than sealed segment reads due to buffered I/O and lack of mmap. The single allocation is for copying record data out (same as sealed segment). Optimized by replacing `binary.Read` (reflection-based) with direct `binary.BigEndian` decoding and using `bufio.Reader.Discard()` instead of `io.CopyN`.
+**Key Finding:** Active segment reads now match sealed segment performance by using mmap. The preallocated log file is mmap'd at segment creation, and reads use the mmap for flushed data while the record cache serves unflushed data. Random reads are actually *faster* than sealed segments because the index is in memory (`indexCache`) vs mmap'd.
 
 ### Cross-Segment Reads
 
@@ -164,9 +164,9 @@ Time to delete expired segments.
 
 | Implementation | Workload | Throughput | Notes |
 |----------------|----------|------------|-------|
-| **Murakami** | Buffered append | 1.4-1.6 GB/s | Apple M1 Max |
+| **Murakami** | Buffered append | 1.3-1.7 GB/s | Apple M1 Max |
 | **Murakami** | Durable (batch=1000) | ~25 MB/s (~98K ops/sec) | |
-| **Murakami** | Active segment read | ~80 MB/s (~300K ops/sec) | Buffered I/O |
+| **Murakami** | Active segment read | 1.5 GB/s (~6M ops/sec) | mmap'd |
 | **Murakami** | Sealed segment read | 1.6 GB/s (~6.4M ops/sec) | mmap'd |
 | **Kafka** | Producer (acks=all) | 200-500K msgs/sec | Per partition, commodity NVMe |
 | **RocksDB WAL** | sync_every_write=true | 50-100K ops/sec | Commodity NVMe |
@@ -185,15 +185,16 @@ Time to delete expired segments.
 
 ### Active Segment Reads ✅ COMPLETED
 
-**Before:** 254K ops/sec with 23 allocations per read.
-**After:** ~300K ops/sec with 1 allocation per read.
+**Before:** 254K ops/sec with 23 allocations per read (file-based I/O).
+**After:** ~6M ops/sec with 1 allocation per read (mmap-based).
 
-**Optimization applied:**
-- Replaced `binary.Read()` (reflection-based, allocates) with direct `binary.BigEndian.Uint32/64()` on pre-allocated buffers
-- Replaced `io.CopyN()` (allocates 32KB buffer) with `bufio.Reader.Discard()` (uses existing buffer)
-- Result: 96% reduction in allocations, ~25% improvement in throughput
+**Optimizations applied:**
+1. Replaced `binary.Read()` (reflection-based) with direct `binary.BigEndian` decoding
+2. Added mmap for the preallocated log file at segment creation
+3. Reads use mmap for flushed data, record cache for unflushed data
+4. Removed file-based read path entirely
 
-**Remaining gap to sealed segment:** Active segment reads (~300K ops/sec) are still ~20x slower than sealed segment reads (~6M ops/sec) due to the fundamental difference between buffered file I/O and mmap. This gap could be closed by mmap'ing the active segment for reads, but would require careful invalidation logic when the write buffer flushes.
+**Result:** Active segment reads now match sealed segment performance (~6M ops/sec). Gap closed!
 
 ### Durable Throughput (Medium Priority)
 
