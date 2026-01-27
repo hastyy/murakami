@@ -602,6 +602,12 @@ func BenchmarkReadConcurrent(b *testing.B) {
 
 // BenchmarkReadWithConcurrentWrites measures read performance while writes are happening.
 // This is a realistic workload for many log-based systems.
+//
+// Note: We have two sub-benchmarks:
+//   - WithTracking: Readers query a shared counter before each read (causes contention).
+//     This was the original implementation but introduces artificial serialization.
+//   - NoTracking: Readers only read from pre-populated records (realistic pattern).
+//     This isolates the actual log mutex contention from benchmark artifacts.
 func BenchmarkReadWithConcurrentWrites(b *testing.B) {
 	const initialRecords = 10_000
 	const recordSize = 256
@@ -615,8 +621,9 @@ func BenchmarkReadWithConcurrentWrites(b *testing.B) {
 		{"1Writer8Readers", 1, 8},
 	}
 
+	// WithTracking: Original implementation with countMu (benchmark artifact)
 	for _, s := range scenarios {
-		b.Run(s.name, func(b *testing.B) {
+		b.Run("WithTracking/"+s.name, func(b *testing.B) {
 			dir := b.TempDir()
 			cfg := benchConfig()
 			l := setupLogWithRecords(b, dir, initialRecords, recordSize, cfg)
@@ -669,6 +676,61 @@ func BenchmarkReadWithConcurrentWrites(b *testing.B) {
 						// May fail if we're reading a very recent append
 						// that hasn't been fully committed yet - that's expected
 						continue
+					}
+				}
+			})
+
+			b.StopTimer()
+			close(writerDone)
+			writerWg.Wait()
+		})
+	}
+
+	// NoTracking: Readers only read from pre-populated records (realistic pattern)
+	// This isolates the actual RWMutex contention without benchmark artifacts.
+	for _, s := range scenarios {
+		b.Run("NoTracking/"+s.name, func(b *testing.B) {
+			dir := b.TempDir()
+			cfg := benchConfig()
+			l := setupLogWithRecords(b, dir, initialRecords, recordSize, cfg)
+			defer func() { _ = l.Close() }()
+
+			// Writer goroutine - just appends, no tracking
+			writerDone := make(chan struct{})
+			writerData := generateTestData(recordSize)
+
+			var writerWg sync.WaitGroup
+			for i := 0; i < s.writers; i++ {
+				writerWg.Add(1)
+				go func() {
+					defer writerWg.Done()
+					for {
+						select {
+						case <-writerDone:
+							return
+						default:
+							if _, err := l.Append(writerData); err != nil {
+								return
+							}
+						}
+					}
+				}()
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			b.SetBytes(recordSize)
+
+			b.SetParallelism(s.readers)
+			b.RunParallel(func(pb *testing.PB) {
+				localRng := rand.New(rand.NewSource(time.Now().UnixNano()))
+				for pb.Next() {
+					// Read from the pre-populated records only
+					// This is the realistic pattern: consumers track their own position
+					offset := Offset(localRng.Intn(initialRecords))
+					if _, err := l.Read(offset); err != nil {
+						b.Errorf("read failed at offset %d: %v", offset, err)
+						return
 					}
 				}
 			})

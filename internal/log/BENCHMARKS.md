@@ -121,14 +121,14 @@ Multiple goroutines reading simultaneously from sealed segments.
 
 ### Reads with Concurrent Writes
 
-Reading while a background writer is appending.
+Reading while a background writer is appending (tight loop, no sync).
 
 | Scenario | Throughput | Latency | Ops/sec |
 |----------|------------|---------|---------|
-| 1 Writer, 4 Readers | 49 MB/s | 5.3 µs/op | ~190K |
-| 1 Writer, 8 Readers | 51 MB/s | 5.0 µs/op | ~199K |
+| 1 Writer, 4 Readers | 525 MB/s | 488 ns/op | ~2.0M |
+| 1 Writer, 8 Readers | 577 MB/s | 444 ns/op | ~2.3M |
 
-**Key Finding:** Mixed read/write workloads show degraded read performance due to lock contention, but remain functional.
+**Key Finding:** Mixed read/write workloads show ~2x latency increase vs read-only (235ns → 444ns). This is expected RWMutex behavior—writers hold exclusive locks that block readers. Still achieves 2M+ ops/sec, which is excellent for mixed workloads.
 
 ---
 
