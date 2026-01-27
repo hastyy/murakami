@@ -337,15 +337,21 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 	// Reset the buffered reader to discard any remaining data in the buffer from previous reads.
 	s.logReader.Reset(s.logReadFile)
 
+	// Use a slice of the decoding buffer for the fixed-size header (length + CRC = 8 bytes).
+	// This avoids allocations from binary.Read which uses reflection internally.
+	headerBuf := s.recordDecodingBuffer[:recordLengthSize+recordCRCSize]
+
 	for {
-		var recordLength uint32
-		err := binary.Read(s.logReader, binary.BigEndian, &recordLength)
+		// Read length + CRC together (8 bytes) into pre-allocated buffer.
+		_, err := io.ReadFull(s.logReader, headerBuf)
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return Record{}, fmt.Errorf("failed to read record length: %w", err)
+			return Record{}, fmt.Errorf("failed to read record header: %w", err)
 		}
+
+		recordLength := binary.BigEndian.Uint32(headerBuf[:recordLengthSize])
 
 		// Reading length 0 means we've already reached the end of the file
 		// and we're reading into the remaining pre-allocated zero'd bytes (linux preallocate)
@@ -357,15 +363,10 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 			break
 		}
 
-		var recordCRC uint32
-		err = binary.Read(s.logReader, binary.BigEndian, &recordCRC)
-		if err != nil {
-			return Record{}, fmt.Errorf("failed to read record CRC: %w", err)
-		}
+		recordCRC := binary.BigEndian.Uint32(headerBuf[recordLengthSize:])
 
-		// Read the record offset.
-		// Keep it in the decoding buffer to calculate the CRC later on.
-		// This avoids allocating a new buffer.
+		// Read the record offset into the decoding buffer (after the header portion).
+		// We reuse the buffer starting at position 0 for the CRC-covered fields.
 		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[:recordOffsetSize])
 		if err != nil {
 			return Record{}, fmt.Errorf("failed to read record offset: %w", err)
@@ -377,39 +378,32 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 			return Record{}, fmt.Errorf("unexpected case: found record offset %d greater than the target offset %d while doing a sequential read", recordOffset, offset)
 		}
 
-		// Skip the remaining record bytes (timestamp + data).
+		// Skip the remaining record bytes (timestamp + data) for non-target records.
+		// Use Discard instead of skipBytes to avoid allocating a new buffer.
 		if recordOffset < offset {
-			err = skipBytes(s.logReader, int64(recordLength)-recordCRCSize-recordOffsetSize)
-			if err != nil {
+			toSkip := int(recordLength) - recordCRCSize - recordOffsetSize
+			if _, err := s.logReader.Discard(toSkip); err != nil {
 				return Record{}, fmt.Errorf("failed to skip remaining record bytes: %w", err)
 			}
 			continue
 		}
 
-		position := recordOffsetSize
-
-		// Read the record timestamp.
-		// Keep it in the decoding buffer to calculate the CRC later on.
-		// This avoids allocating a new buffer.
-		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[position:position+recordTimestampSize])
+		// Found the target record. Read the remaining fields (timestamp + data).
+		remainingSize := int(recordLength) - recordCRCSize - recordOffsetSize
+		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[recordOffsetSize:recordOffsetSize+remainingSize])
 		if err != nil {
-			return Record{}, fmt.Errorf("failed to read record timestamp: %w", err)
-		}
-		recordTimestamp := int64(binary.BigEndian.Uint64(s.recordDecodingBuffer[position : position+recordTimestampSize]))
-
-		position += recordTimestampSize
-
-		// Read the record data.
-		// Keep it in the decoding buffer to calculate the CRC later on.
-		// This avoids allocating a new buffer.
-		dataSize := int(recordDataSize(int64(recordLength)))
-		_, err = io.ReadFull(s.logReader, s.recordDecodingBuffer[position:position+dataSize])
-		if err != nil {
-			return Record{}, fmt.Errorf("failed to read record data: %w", err)
+			return Record{}, fmt.Errorf("failed to read record body: %w", err)
 		}
 
-		// Calculate the CRC over the binary fields it covers and check the result against the stored CRC.
-		crc := crc32.ChecksumIEEE(s.recordDecodingBuffer[:position+dataSize])
+		// Parse timestamp from buffer.
+		recordTimestamp := int64(binary.BigEndian.Uint64(s.recordDecodingBuffer[recordOffsetSize : recordOffsetSize+recordTimestampSize]))
+
+		// Calculate data size and position.
+		dataSize := remainingSize - recordTimestampSize
+		dataStart := recordOffsetSize + recordTimestampSize
+
+		// Calculate the CRC over the binary fields it covers (offset + timestamp + data).
+		crc := crc32.ChecksumIEEE(s.recordDecodingBuffer[:recordOffsetSize+remainingSize])
 		if crc != recordCRC {
 			return Record{}, fmt.Errorf("record CRC mismatch: %d != %d", crc, recordCRC)
 		}
@@ -417,7 +411,7 @@ func (s *activeSegment) readRecordFromFile(offset Offset, startPosition int64) (
 		// Copy the record data into a new buffer.
 		// This avoids returning a slice to the caller that would point to the decoding buffer.
 		data := make([]byte, dataSize)
-		copy(data, s.recordDecodingBuffer[position:position+dataSize])
+		copy(data, s.recordDecodingBuffer[dataStart:dataStart+dataSize])
 
 		return newRecord(recordOffset, recordTimestamp, data), nil
 	}
@@ -811,12 +805,6 @@ func preallocateDiskSpace(file *os.File, size int64) error {
 	// Fallback: truncate (works on all platforms)
 	// Creates sparse file - not "true" preallocation but sufficient
 	return file.Truncate(size)
-}
-
-// skipBytes consumes the next n bytes from the reader without processing them.
-func skipBytes(r io.Reader, n int64) error {
-	_, err := io.CopyN(io.Discard, r, n)
-	return err
 }
 
 // flushAwareWriter is a writer that sits in between a bufio.Writer and its

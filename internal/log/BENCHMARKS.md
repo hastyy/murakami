@@ -90,11 +90,11 @@ Reading from the currently active (writable) segment.
 
 | Access Pattern | Throughput | Latency | Ops/sec | Allocations |
 |----------------|------------|---------|---------|-------------|
-| Sequential | 65 MB/s | 3.9 µs/op | ~254K | 23 allocs |
-| Random | 63 MB/s | 4.1 µs/op | ~244K | 23 allocs |
-| Hot | 66 MB/s | 3.9 µs/op | ~258K | 24 allocs |
+| Sequential | 81 MB/s | 3.2 µs/op | ~316K | 1 alloc |
+| Random | 74 MB/s | 3.5 µs/op | ~287K | 1 alloc |
+| Hot | 83 MB/s | 3.1 µs/op | ~324K | 1 alloc |
 
-**Key Finding:** Active segment reads are ~25x slower than sealed segment reads due to buffered I/O and lack of mmap. The 23 allocations per read come from binary reader operations. This is a potential optimization target.
+**Key Finding:** Active segment reads are ~20x slower than sealed segment reads due to buffered I/O and lack of mmap. The single allocation is for copying record data out (same as sealed segment). Optimized by replacing `binary.Read` (reflection-based) with direct `binary.BigEndian` decoding and using `bufio.Reader.Discard()` instead of `io.CopyN`.
 
 ### Cross-Segment Reads
 
@@ -164,8 +164,9 @@ Time to delete expired segments.
 
 | Implementation | Workload | Throughput | Notes |
 |----------------|----------|------------|-------|
-| **Murakami** | Buffered append | 1.5-1.8 GB/s | Apple M1 Max |
-| **Murakami** | Durable (batch=1000) | ~24 MB/s (~93K ops/sec) | |
+| **Murakami** | Buffered append | 1.4-1.6 GB/s | Apple M1 Max |
+| **Murakami** | Durable (batch=1000) | ~25 MB/s (~98K ops/sec) | |
+| **Murakami** | Active segment read | ~80 MB/s (~300K ops/sec) | Buffered I/O |
 | **Murakami** | Sealed segment read | 1.6 GB/s (~6.4M ops/sec) | mmap'd |
 | **Kafka** | Producer (acks=all) | 200-500K msgs/sec | Per partition, commodity NVMe |
 | **RocksDB WAL** | sync_every_write=true | 50-100K ops/sec | Commodity NVMe |
@@ -182,26 +183,23 @@ Time to delete expired segments.
 
 ## Optimization Opportunities
 
-### Active Segment Reads (High Priority)
+### Active Segment Reads ✅ COMPLETED
 
-Current: 254K ops/sec with 23 allocations per read.
-Target: Closer to sealed segment performance (~2M+ ops/sec).
+**Before:** 254K ops/sec with 23 allocations per read.
+**After:** ~300K ops/sec with 1 allocation per read.
 
-**Root Cause:** `readRecordFromFile()` in `segment.go` uses `binary.Read()` which allocates, and doesn't pool the record data buffer.
+**Optimization applied:**
+- Replaced `binary.Read()` (reflection-based, allocates) with direct `binary.BigEndian.Uint32/64()` on pre-allocated buffers
+- Replaced `io.CopyN()` (allocates 32KB buffer) with `bufio.Reader.Discard()` (uses existing buffer)
+- Result: 96% reduction in allocations, ~25% improvement in throughput
 
-**Potential Fixes:**
-1. Pool record data buffers
-2. Use pre-allocated decode buffers more aggressively
-3. Consider mmap for active segment reads (with careful invalidation)
+**Remaining gap to sealed segment:** Active segment reads (~300K ops/sec) are still ~20x slower than sealed segment reads (~6M ops/sec) due to the fundamental difference between buffered file I/O and mmap. This gap could be closed by mmap'ing the active segment for reads, but would require careful invalidation logic when the write buffer flushes.
 
 ### Durable Throughput (Medium Priority)
 
 Current: ~93K ops/sec at batch=1000.
 
-**Potential Fixes:**
-1. Group commit: Batch multiple writers' syncs together
-2. io_uring on Linux for async fsync
-3. Separate sync goroutine with coalescing
+**Potential Fix:** Group commit—batch multiple writers' syncs together. This is a **client-side pattern**, not a log-internal feature. The log already provides the right primitives (`Append` + `Sync`); coordination happens at a higher layer.
 
 ### Memory Usage (Low Priority)
 
