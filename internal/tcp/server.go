@@ -330,8 +330,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, h Handler) {
 	c.Attach(conn)
 	defer c.Detach()
 
-	c.ResetLimits()
-
 	for {
 		select {
 		case <-ctx.Done():
